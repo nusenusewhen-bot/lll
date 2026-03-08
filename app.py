@@ -11,7 +11,7 @@ from socketserver import ThreadingMixIn
 from playwright.async_api import async_playwright
 from datetime import datetime
 
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://discord.com/api/webhooks/1479843046223909040/kGSLiyRPqh9TqsZfhRqMqc0fHdF05ZasD7DQNMHGT4Y7Su3yrCTU7N1Y_QhdZwgie614")
 CAPTCHA_KEY = "44b5a90f-182f-4c67-b219-ef8dfd33d7a1"
 
 sessions = {}
