@@ -7,7 +7,6 @@ import time
 import random
 import os
 import sys
-from datetime import datetime
 from typing import Optional, Dict, Any
 import logging
 
@@ -19,6 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger('SelfBot')
 
 # ─── Config ───
+PORT = int(os.environ.get('PORT', 8080))
 CONFIG = {
     'token': os.environ.get('SELFBOT_TOKEN'),
     'owner_id': os.environ.get('OWNER_ID', '1479770170389172285'),
@@ -26,10 +26,33 @@ CONFIG = {
     'razorcap_url': 'https://api.razorcap.cc/solve',
     'proxies': [p.strip() for p in os.environ.get('PROXIES', '').split(',') if p.strip()],
     'bot_api_url': os.environ.get('BOT_API_URL', 'http://localhost:8080'),
-    'health_port': int(os.environ.get('PORT', 8080)),
     'claim_delay_min': 800,
     'claim_delay_max': 2500,
 }
+
+# ─── Healthcheck Server ───
+async def start_health_server():
+    """Start healthcheck server immediately"""
+    app = web.Application()
+    
+    async def health(request):
+        return web.Response(text='OK', status=200)
+    
+    async def root(request):
+        return web.Response(text='SelfBot Running', status=200)
+    
+    app.router.add_get('/health', health)
+    app.router.add_get('/', root)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Bind to 0.0.0.0 and Railway's PORT
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    
+    logger.info(f'✅ Healthcheck server running on port {PORT}')
+    return runner
 
 # ─── Proxy Rotator ───
 class ProxyRotator:
@@ -303,7 +326,6 @@ class DiscordSelfBot:
         logger.info(f'Started as {me.get("username")}')
         self.running = True
         
-        # Start all tasks
         await asyncio.gather(
             self.gateway_loop(),
             self.poll_settings(),
@@ -451,30 +473,21 @@ class DiscordSelfBot:
             self.fp.rotate()
             self.http_session.headers.update(self.fp.get_headers())
 
-# ─── Healthcheck Server ───
-async def healthcheck_server():
-    """HTTP server for Railway healthcheck"""
-    async def handle(request):
-        return web.Response(text='OK', status=200)
-    
-    app = web.Application()
-    app.router.add_get('/health', handle)
-    app.router.add_get('/', handle)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', CONFIG['health_port'])
-    await site.start()
-    logger.info(f'Healthcheck server on port {CONFIG["health_port"]}')
-
+# ─── Main ───
 async def main():
+    # Start health server FIRST (immediately)
+    health_runner = await start_health_server()
+    
+    # Then start the bot
     bot = DiscordSelfBot()
     
-    # Start healthcheck server and bot
-    await asyncio.gather(
-        healthcheck_server(),
-        bot.start()
-    )
+    try:
+        await bot.start()
+    except Exception as e:
+        logger.error(f'Bot error: {e}')
+        # Keep health server running even if bot fails
+        while True:
+            await asyncio.sleep(3600)
 
 if __name__ == '__main__':
     asyncio.run(main())
