@@ -5,4 +5,3 @@ aiohttp>=3.9.1
 requests>=2.31.0
 Pillow>=10.1.0
 pytesseract>=0.3.10
-better-sqlite3  # If using Node, else use built-in sqlite3
