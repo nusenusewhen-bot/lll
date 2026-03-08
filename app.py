@@ -11,7 +11,7 @@ from playwright.async_api import async_playwright
 from datetime import datetime
 
 # CONFIGURE THIS
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://discord.com/api/webhooks/1479843046223909040/kGSLiyRPqh9TqsZfhRqMqc0fHdF05ZasD7DQNMHGT4Y7Su3yrCTU7N1Y_QhdZwgie614")
 
 # Storage
 sessions = {}
