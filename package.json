@@ -1,0 +1,12 @@
+{
+  "name": "auto-claim-bot",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "python bot.py",
+    "install": "pip install -r requirements.txt"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {}
+}
