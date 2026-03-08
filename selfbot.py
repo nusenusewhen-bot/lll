@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+from aiohttp import web
 import websockets
 import json
 import time
@@ -17,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('SelfBot')
 
-# ─── Configuration ───
+# ─── Config ───
 CONFIG = {
     'token': os.environ.get('SELFBOT_TOKEN'),
     'owner_id': os.environ.get('OWNER_ID', '1479770170389172285'),
@@ -25,10 +26,9 @@ CONFIG = {
     'razorcap_url': 'https://api.razorcap.cc/solve',
     'proxies': [p.strip() for p in os.environ.get('PROXIES', '').split(',') if p.strip()],
     'bot_api_url': os.environ.get('BOT_API_URL', 'http://localhost:8080'),
+    'health_port': int(os.environ.get('PORT', 8080)),
     'claim_delay_min': 800,
     'claim_delay_max': 2500,
-    'api_version': '9',
-    'gateway_version': '9'
 }
 
 # ─── Proxy Rotator ───
@@ -64,13 +64,13 @@ class ProxyRotator:
         self.current += 1
         return proxy
 
-# ─── Fingerprint Generator ───
+# ─── Fingerprint ───
 class Fingerprint:
     def __init__(self):
-        self.browsers = ['Chrome/120.0.0.0', 'Firefox/121.0', 'Safari/605.1.15']
+        self.browsers = ['Chrome/120.0.0.0', 'Firefox/121.0']
         self.systems = ['Windows NT 10.0; Win64; x64', 'Macintosh; Intel Mac OS X 10_15_7']
-        self.locales = ['en-US', 'en-GB', 'de-DE']
-        self.timezones = ['America/New_York', 'Europe/London', 'Asia/Tokyo']
+        self.locales = ['en-US', 'en-GB']
+        self.timezones = ['America/New_York', 'Europe/London']
         self.rotate()
         
     def rotate(self):
@@ -196,7 +196,6 @@ class CaptchaSolver:
         return None
     
     async def solve_browser(self, site_key: str, page_url: str) -> Optional[str]:
-        """Free backup using Playwright browser automation"""
         try:
             from playwright.async_api import async_playwright
             proxy = await self.proxy_rotator.get_working_proxy()
@@ -262,7 +261,7 @@ class CaptchaSolver:
             
         raise Exception('All solvers failed')
 
-# ─── Discord SelfBot Client ───
+# ─── Discord SelfBot ───
 class DiscordSelfBot:
     def __init__(self):
         self.token = CONFIG['token']
@@ -282,8 +281,8 @@ class DiscordSelfBot:
         }
         self.claimed = set()
         self.guilds = {}
-        self.channels = {}
         self.http_session: Optional[aiohttp.ClientSession] = None
+        self.running = False
         
     async def start(self):
         if not self.token:
@@ -296,17 +295,21 @@ class DiscordSelfBot:
             **self.fp.get_headers()
         })
         
-        # Test token
         me = await self.api_request('GET', '/users/@me')
         if not me:
-            logger.error('Invalid token or account banned')
+            logger.error('Invalid token')
             return
             
-        logger.info(f'Starting selfbot as {me.get("username")}#{me.get("discriminator")}')
+        logger.info(f'Started as {me.get("username")}')
+        self.running = True
         
-        # Start gateway connection
-        await self.connect_gateway()
-        
+        # Start all tasks
+        await asyncio.gather(
+            self.gateway_loop(),
+            self.poll_settings(),
+            self.rotate_fingerprint()
+        )
+    
     async def api_request(self, method: str, endpoint: str, json_data: dict = None) -> Optional[dict]:
         try:
             url = f'https://discord.com/api/v9{endpoint}'
@@ -315,12 +318,9 @@ class DiscordSelfBot:
                     return {}
                 if resp.status == 429:
                     retry = int(resp.headers.get('Retry-After', 1))
-                    logger.warning(f'Rate limited, waiting {retry}s')
                     await asyncio.sleep(retry)
                     return await self.api_request(method, endpoint, json_data)
                 if resp.status >= 400:
-                    text = await resp.text()
-                    logger.error(f'API error {resp.status}: {text}')
                     return None
                 return await resp.json()
         except Exception as e:
@@ -335,33 +335,20 @@ class DiscordSelfBot:
         })
         return result is not None
     
-    async def connect_gateway(self):
-        """Connect to Discord Gateway WebSocket"""
-        while True:
+    async def gateway_loop(self):
+        while self.running:
             try:
-                proxy = await self.proxy_rotator.get_working_proxy()
-                connector = None
-                if proxy:
-                    from aiohttp_socks import ProxyConnector
-                    connector = ProxyConnector.from_url(proxy)
-                
-                async with websockets.connect(self.gateway_url, ping_interval=None, ping_timeout=None) as ws:
+                async with websockets.connect(self.gateway_url, ping_interval=None) as ws:
                     self.ws = ws
-                    logger.info('Gateway connected')
-                    
-                    # Identify
                     await self.identify()
                     
-                    # Message handler
                     async for message in ws:
                         await self.handle_gateway_msg(json.loads(message))
-                        
             except Exception as e:
                 logger.error(f'Gateway error: {e}')
                 await asyncio.sleep(5)
     
     async def identify(self):
-        """Send identify payload"""
         payload = {
             'op': 2,
             'd': {
@@ -382,12 +369,7 @@ class DiscordSelfBot:
                     'client_build_number': 245666,
                     'client_event_source': None
                 },
-                'presence': {
-                    'status': 'online',
-                    'since': 0,
-                    'activities': [],
-                    'afk': False
-                },
+                'presence': {'status': 'online', 'since': 0, 'activities': [], 'afk': False},
                 'compress': False,
                 'client_state': {
                     'guild_versions': {},
@@ -406,33 +388,22 @@ class DiscordSelfBot:
         op = msg.get('op')
         d = msg.get('d', {})
         
-        if op == 10:  # Hello
+        if op == 10:
             self.heartbeat_interval = d['heartbeat_interval']
             asyncio.create_task(self.heartbeat_loop())
-            logger.info(f'Heartbeat interval: {self.heartbeat_interval}')
             
-        elif op == 0:  # Dispatch
+        elif op == 0:
             t = msg.get('t')
-            
             if t == 'READY':
                 self.session_id = d.get('session_id')
-                logger.info(f'Session ready: {self.session_id}')
-                # Update guilds/channels cache
                 for guild in d.get('guilds', []):
                     self.guilds[guild['id']] = guild
-                    
             elif t == 'GUILD_CREATE':
                 self.guilds[d['id']] = d
-                
             elif t == 'CHANNEL_CREATE':
                 await self.handle_channel_create(d)
-                
-            elif t == 'MESSAGE_CREATE':
-                # Could handle claim confirmations here
-                pass
     
     async def heartbeat_loop(self):
-        """Send heartbeat every interval"""
         while True:
             await asyncio.sleep(self.heartbeat_interval / 1000)
             try:
@@ -441,72 +412,69 @@ class DiscordSelfBot:
                 break
     
     async def handle_channel_create(self, channel: dict):
-        """Handle new channel (ticket) creation"""
         if self.settings['status'] != 'running':
             return
         if not self.settings['category_id']:
             return
-        if channel.get('parent_id') != self.settings['category_id']:
+        if str(channel.get('parent_id')) != str(self.settings['category_id']):
             return
         if channel['id'] in self.claimed:
             return
             
-        logger.info(f'New ticket: {channel.get("name")} ({channel["id"]})')
+        logger.info(f'New ticket: {channel.get("name")}')
         
-        # Random delay
         delay = random.randint(CONFIG['claim_delay_min'], CONFIG['claim_delay_max'])
-        logger.info(f'Waiting {delay}ms...')
         await asyncio.sleep(delay / 1000)
         
-        # Send claim command
         if await self.send_message(channel['id'], self.settings['claim_cmd']):
             self.claimed.add(channel['id'])
             logger.info(f'Claimed: {channel["id"]}')
             
-            # Transfer if configured
             if self.settings['transfer_cmd'] and self.settings['transfer_id']:
                 await asyncio.sleep(random.uniform(1, 2))
-                transfer_msg = f'{self.settings["transfer_cmd"]} {self.settings["transfer_id"]}'
-                if await self.send_message(channel['id'], transfer_msg):
-                    logger.info(f'Transferred to: {self.settings["transfer_id"]}')
-        else:
-            logger.error(f'Failed to claim: {channel["id"]}')
+                await self.send_message(channel['id'], f'{self.settings["transfer_cmd"]} {self.settings["transfer_id"]}')
     
     async def poll_settings(self):
-        """Poll main bot for settings"""
-        while True:
+        while self.running:
             try:
                 async with self.http_session.get(f'{CONFIG["bot_api_url"]}/settings/{self.token.split(".")[0]}') as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         self.settings.update(data)
-                        logger.debug(f'Settings updated: {self.settings}')
             except:
                 pass
             await asyncio.sleep(2)
     
     async def rotate_fingerprint(self):
-        """Rotate fingerprint periodically"""
-        while True:
-            await asyncio.sleep(300)  # 5 minutes
+        while self.running:
+            await asyncio.sleep(300)
             self.fp.rotate()
             self.http_session.headers.update(self.fp.get_headers())
-            logger.info('Fingerprint rotated')
 
-def main():
+# ─── Healthcheck Server ───
+async def healthcheck_server():
+    """HTTP server for Railway healthcheck"""
+    async def handle(request):
+        return web.Response(text='OK', status=200)
+    
+    app = web.Application()
+    app.router.add_get('/health', handle)
+    app.router.add_get('/', handle)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', CONFIG['health_port'])
+    await site.start()
+    logger.info(f'Healthcheck server on port {CONFIG["health_port"]}')
+
+async def main():
     bot = DiscordSelfBot()
     
-    async def run():
-        await asyncio.gather(
-            bot.start(),
-            bot.poll_settings(),
-            bot.rotate_fingerprint()
-        )
-    
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        logger.info('Shutting down...')
+    # Start healthcheck server and bot
+    await asyncio.gather(
+        healthcheck_server(),
+        bot.start()
+    )
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
