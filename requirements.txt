@@ -1,7 +1,8 @@
-discord.py==2.3.2
-discord-py-slash-command==4.2.1
-websockets==12.0
-aiohttp==3.9.1
-requests==2.31.0
-Pillow==10.1.0
-pytesseract==0.3.10
+discord.py>=2.3.2
+py-cord>=2.4.1
+websockets>=12.0
+aiohttp>=3.9.1
+requests>=2.31.0
+Pillow>=10.1.0
+pytesseract>=0.3.10
+better-sqlite3  # If using Node, else use built-in sqlite3
