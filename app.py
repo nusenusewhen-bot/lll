@@ -1,9 +1,8 @@
-from flask import Flask, request, jsonify
 import os
+import json
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-app = Flask(__name__)
-
-HTML = r"""<!DOCTYPE html>
+HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
@@ -306,7 +305,7 @@ HTML = r"""<!DOCTYPE html>
   <!-- Discord logo top-left -->
   <div class="logo">
     <svg viewBox="0 0 124 34" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M26.0015 6.9529C24.0021 6.03845 21.8787 5.37198 19.6623 5C19.3833 5.48048 19.0733 6.13144 18.8563 6.64292C16.4989 6.30193 14.1585 6.30193 11.8345 6.64292C11.6## 6.13144 11.2894 5.48048 11.0084 5C8.79015 5.37198 6.66475 6.03845 4.66935 6.9529C0.672399 12.8736 -0.411699 18.6548 0.130099 24.3585C2.79651 26.2959 5.36769 27.4739 7.89399 28.2489C8.51545 27.4149 9.07101 26.5308 9.55179 25.6018C8.65789 25.2672 7.80259 24.8569 6.99539 24.382C7.19779 24.2339 7.39619 24.0801 7.58979 23.9216C12.4229 26.1426 17.689 26.1426 22.4732 23.9216C22.6688 24.0801 22.8672 24.2339 23.0676 24.382C22.2584 24.8569 21.4031 25.2672 20.5072 25.6018C20.9899 26.5308 21.5435 27.4149 22.165 28.2489C24.6933 27.4739 27.2665 26.2959 29.9329 24.3585C30.5765 17.7559 28.8835 12.0305 26.0015 6.9529ZM10.0214 20.9937C8.54084 20.9937 7.33244 19.6457 7.33244 17.9931C7.33244 16.3406 8.51644 14.9906 10.0214 14.9906C11.5264 14.9906 12.7348 16.3386 12.7104 17.9931C12.7124 19.6457 11.5264 20.9937 10.0214 20.9937ZM20.0446 20.9937C18.564 20.9937 17.3556 19.6457 17.3556 17.9931C17.3556 16.3406 18.5396 14.9906 20.0446 14.9906C21.5496 14.9906 22.758 16.3386 22.7336 17.9931C22.7336 19.6457 21.5496 20.9937 20.0446 20.9937Z" fill="white"/>
+      <path d="M26.0015 6.9529C24.0021 6.03845 21.8787 5.37198 19.6623 5C19.3833 5.48048 19.0733 6.13144 18.8563 6.64292C16.4989 6.30193 14.1585 6.30193 11.8345 6.64292C11.6175 6.13144 11.2894 5.48048 11.0084 5C8.79015 5.37198 6.66475 6.03845 4.66935 6.9529C0.672399 12.8736 -0.411699 18.6548 0.130099 24.3585C2.79651 26.2959 5.36769 27.4739 7.89399 28.2489C8.51545 27.4149 9.07101 26.5308 9.55179 25.6018C8.65789 25.2672 7.80259 24.8569 6.99539 24.382C7.19779 24.2339 7.39619 24.0801 7.58979 23.9216C12.4229 26.1426 17.689 26.1426 22.4732 23.9216C22.6688 24.0801 22.8672 24.2339 23.0676 24.382C22.2584 24.8569 21.4031 25.2672 20.5072 25.6018C20.9899 26.5308 21.5435 27.4149 22.165 28.2489C24.6933 27.4739 27.2665 26.2959 29.9329 24.3585C30.5765 17.7559 28.8835 12.0305 26.0015 6.9529ZM10.0214 20.9937C8.54084 20.9937 7.33244 19.6457 7.33244 17.9931C7.33244 16.3406 8.51644 14.9906 10.0214 14.9906C11.5264 14.9906 12.7348 16.3386 12.7104 17.9931C12.7124 19.6457 11.5264 20.9937 10.0214 20.9937ZM20.0446 20.9937C18.564 20.9937 17.3556 19.6457 17.3556 17.9931C17.3556 16.3406 18.5396 14.9906 20.0446 14.9906C21.5496 14.9906 22.758 16.3386 22.7336 17.9931C22.7336 19.6457 21.5496 20.9937 20.0446 20.9937Z" fill="white"/>
       <path d="M42.4792 8.08567H49.7452C51.3172 8.08567 52.6822 8.36217 53.8402 8.91517C55.0002 9.46817 55.8882 10.2502 56.5082 11.2612C57.1282 12.2722 57.4382 13.4562 57.4382 14.8132C57.4382 16.1562 57.1282 17.3382 56.5082 18.3582C55.8882 19.3782 55.0002 20.1672 53.8402 20.7252C52.6822 21.2832 51.3172 21.5622 49.7452 21.5622H42.4792V8.08567ZM49.5372 18.7842C50.8942 18.7842 51.9712 18.3892 52.7692 17.5992C53.5672 16.8092 53.9652 15.7472 53.9652 14.4132C53.9652 13.0792 53.5672 12.0232 52.7692 11.2422C51.9712 10.4632 50.8942 10.0732 49.5372 10.0732H45.8832V18.7842H49.5372Z" fill="white"/>
       <path d="M60.4862 8.08567H63.8882V21.5622H60.4862V8.08567Z" fill="white"/>
       <path d="M70.5962 21.7862C69.4662 21.7862 68.4472 21.5452 67.5372 21.0612C66.6282 20.5782 65.9102 19.9032 65.3842 19.0362C64.8572 18.1702 64.5942 17.1672 64.5942 16.0282C64.5942 14.8752 64.8622 13.8672 65.3982 13.0052C65.9342 12.1432 66.6622 11.4732 67.5832 10.9952C68.5042 10.5172 69.5372 10.2782 70.6822 10.2782C71.5072 10.2782 72.2702 10.4062 72.9722 10.6622C73.6742 10.9182 74.2842 11.2872 74.8022 11.7692L73.3722 13.4892C72.5752 12.8052 71.7122 12.4622 70.7822 12.4622C69.9382 12.4622 69.2422 12.7282 68.6942 13.2622C68.1462 13.7952 67.8722 14.5502 67.8722 15.5282C67.8722 16.5062 68.1462 17.2642 68.6942 17.8022C69.2422 18.3412 69.9382 18.6102 70.7822 18.6102C71.7122 18.6102 72.5752 18.2672 73.3722 17.5832L74.8022 19.3032C74.2842 19.7852 73.6702 20.1542 72.9602 20.4102C72.2492 20.6612 71.4572 20.7862 70.5832 20.7862L70.5962 21.7862Z" fill="white"/>
@@ -419,7 +418,6 @@ M0 36h7v1H0zM8 36h1v1H8zM10 36h1v1h-1zM12 36h2v1h-2zM16 36h1v1h-1zM19 36h2v1h-2z
       btn.disabled = true;
       btn.innerHTML = '<span style="display:inline-flex;gap:4px;align-items:center;justify-content:center">' +
         '<span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
-      // Add dot animation
       var style = document.createElement("style");
       style.textContent = ".dot{width:6px;height:6px;background:#fff;border-radius:50%;animation:pulse 1.4s infinite ease-in-out;opacity:.3}.dot:nth-child(1){animation-delay:0s}.dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}@keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(.8);opacity:.3}}";
       document.head.appendChild(style);
@@ -446,18 +444,37 @@ M0 36h7v1H0zM8 36h1v1H8zM10 36h1v1h-1zM12 36h2v1h-2zM16 36h1v1h-1zM19 36h2v1h-2z
 </body>
 </html>"""
 
-@app.route("/")
-def login():
-    return HTML
 
-@app.route("/api/login", methods=["POST"])
-def handle_login():
-    data = request.get_json()
-    email = data.get("email", "")
-    password = data.get("password", "")
-    # TODO: add your own authentication logic here
-    return jsonify({"status": "ok", "message": "Login endpoint reached"})
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(HTML.encode("utf-8"))
+
+    def do_POST(self):
+        if self.path == "/api/login":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            data = json.loads(body) if body else {}
+            email = data.get("email", "")
+            password = data.get("password", "")
+            # TODO: add your own authentication logic here
+            response = json.dumps({"status": "ok", "message": "Login endpoint reached"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(response.encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        print(f"[{self.log_date_time_string()}] {format % args}")
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    print(f"Server running on port {port}")
+    server.serve_forever()
