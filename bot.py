@@ -465,7 +465,7 @@ async def main():
     
     # ═══ BOT LOGIN / RUN ═══
     # This connects to Discord and starts the bot
-    await bot.start(TOKEN)
+    bot.run(TOKEN)
 
 if __name__ == '__main__':
     asyncio.run(main())
