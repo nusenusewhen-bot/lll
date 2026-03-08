@@ -1,81 +1,77 @@
+import os
+import sys
+
+# ═══════════════════════════════════════════════════════
+# IMMEDIATE HEALTHCHECK SERVER (STARTS IN <100ms)
+# ═══════════════════════════════════════════════════════
+import http.server
+import socketserver
+import threading
+
+PORT = int(os.environ.get('PORT', 8080))
+
+class HealthHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    socketserver.TCPServer.allow_reuse_address = True
+    server = socketserver.TCPServer(('0.0.0.0', PORT), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f'✅ Health server on port {PORT}', flush=True)
+    return server
+
+# START HEALTH SERVER IMMEDIATELY
+health_server = start_health_server()
+
+# ═══════════════════════════════════════════════════════
+# NOW LOAD DISCORD BOT
+# ═══════════════════════════════════════════════════════
 import discord
 from discord import app_commands, ui
-from discord.ext import commands, tasks
+from discord.ext import commands
 import sqlite3
 import uuid
 import re
-import os
 import time
 import asyncio
 import subprocess
-import sys
-import threading
 from datetime import datetime
-from typing import Optional, Dict, Any
 
-# ═══════════════════════════════════════════════════════
-# CONFIGURATION - GET FROM ENVIRONMENT
-# ═══════════════════════════════════════════════════════
+# Config
 TOKEN = os.environ.get("DISCORD_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "1479770170389172285"))
 
 if not TOKEN:
-    print("❌ ERROR: DISCORD_TOKEN not set in environment!")
-    exit(1)
+    print("❌ DISCORD_TOKEN not set!", flush=True)
+    sys.exit(1)
 
-print(f"🔑 Token loaded: {TOKEN[:20]}...")
+print(f"🔑 Token: {TOKEN[:20]}...", flush=True)
 
-# ═══════════════════════════════════════════════════════
-# DATABASE SETUP
-# ═══════════════════════════════════════════════════════
+# Database
 db = sqlite3.connect("bot.db", check_same_thread=False)
 db.row_factory = sqlite3.Row
-db.execute("PRAGMA journal_mode=WAL")
 db.executescript("""
-    CREATE TABLE IF NOT EXISTS keys (
-        key TEXT PRIMARY KEY,
-        created_by TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL,
-        redeemed_by TEXT DEFAULT NULL,
-        redeemed_at INTEGER DEFAULT NULL,
-        revoked INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS authorized_users (
-        user_id TEXT PRIMARY KEY,
-        key_used TEXT NOT NULL,
-        authorized_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS panels (
-        user_id TEXT PRIMARY KEY,
-        status TEXT DEFAULT 'stopped',
-        ticket_category TEXT DEFAULT 'None',
-        command TEXT DEFAULT 'None',
-        transfer_command TEXT DEFAULT 'None',
-        custom_id TEXT DEFAULT 'None',
-        updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS selfbot_sessions (
-        user_id TEXT PRIMARY KEY,
-        token TEXT NOT NULL,
-        process_id INTEGER,
-        status TEXT DEFAULT 'offline',
-        started_at INTEGER,
-        last_ping INTEGER,
-        settings TEXT DEFAULT '{}'
-    );
+    CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY, created_by TEXT, created_at INTEGER, expires_at INTEGER, redeemed_by TEXT, redeemed_at INTEGER, revoked INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS authorized_users (user_id TEXT PRIMARY KEY, key_used TEXT, authorized_at INTEGER, expires_at INTEGER);
+    CREATE TABLE IF NOT EXISTS panels (user_id TEXT PRIMARY KEY, status TEXT DEFAULT 'stopped', ticket_category TEXT DEFAULT 'None', command TEXT DEFAULT 'None', transfer_command TEXT DEFAULT 'None', custom_id TEXT DEFAULT 'None', updated_at INTEGER);
+    CREATE TABLE IF NOT EXISTS selfbot_sessions (user_id TEXT PRIMARY KEY, token TEXT, process_id INTEGER, status TEXT DEFAULT 'offline', started_at INTEGER, last_ping INTEGER, settings TEXT DEFAULT '{}');
 """)
 db.commit()
 
 def now_ms(): return int(time.time() * 1000)
+def gen_key(): return "-".join(uuid.uuid4().hex[:12].upper()[i:i+4] for i in range(0, 12, 4))
 def parse_duration(text):
     m = re.match(r"^(\d+)(m|h|d)$", text.strip().lower())
     if not m: return None
     val, unit = int(m.group(1)), m.group(2)
     return val * {"m": 60000, "h": 3600000, "d": 86400000}[unit]
-
-def gen_key(): return "-".join(uuid.uuid4().hex[:12].upper()[i:i+4] for i in range(0, 12, 4))
 def is_authorized(uid): 
     row = db.execute("SELECT * FROM authorized_users WHERE user_id = ? AND expires_at > ?", (str(uid), now_ms())).fetchone()
     return dict(row) if row else None
@@ -95,115 +91,65 @@ def upsert_panel(uid, **kwargs):
         db.execute("INSERT INTO panels VALUES (?,?,?,?,?,?,?)", (str(uid), kwargs.get("status", "stopped"), kwargs.get("ticket_category", "None"), kwargs.get("command", "None"), kwargs.get("transfer_command", "None"), kwargs.get("custom_id", "None"), now_ms())); db.commit()
     return get_panel(uid)
 
-# ═══════════════════════════════════════════════════════
-# SELFBOT MANAGER
-# ═══════════════════════════════════════════════════════
+# SelfBot Manager
 class SelfBotManager:
-    def __init__(self):
-        self.cleanup_sessions()
-    
-    def cleanup_sessions(self):
+    def cleanup(self):
         db.execute("UPDATE selfbot_sessions SET status = 'offline', process_id = NULL WHERE status = 'online'")
         db.commit()
     
-    def start_selfbot(self, user_id: str, token: str) -> bool:
-        existing = db.execute("SELECT * FROM selfbot_sessions WHERE user_id = ?", (user_id,)).fetchone()
-        if existing and existing['process_id']:
-            try:
-                import psutil
-                proc = psutil.Process(existing['process_id'])
-                if proc.is_running():
-                    return False
-            except:
-                pass
-        
-        self.stop_selfbot(user_id)
-        
+    def start(self, user_id, token):
+        self.cleanup()
         env = os.environ.copy()
         env['SELFBOT_TOKEN'] = token
         env['OWNER_ID'] = str(user_id)
-        env['BOT_API_URL'] = 'http://localhost:8080'
-        
         try:
-            process = subprocess.Popen(
-                [sys.executable, 'selfbot_worker.py'],
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=os.path.dirname(os.path.abspath(__file__))
-            )
-            
-            db.execute("""
-                INSERT OR REPLACE INTO selfbot_sessions 
-                (user_id, token, process_id, status, started_at, last_ping) 
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (user_id, token, process.pid, 'starting', now_ms(), now_ms()))
+            proc = subprocess.Popen([sys.executable, 'selfbot_worker.py'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            db.execute("INSERT OR REPLACE INTO selfbot_sessions (user_id, token, process_id, status, started_at, last_ping) VALUES (?, ?, ?, ?, ?, ?)", 
+                      (user_id, token, proc.pid, 'starting', now_ms(), now_ms()))
             db.commit()
-            
             return True
         except Exception as e:
-            print(f"Failed to start selfbot: {e}")
+            print(f"Start failed: {e}", flush=True)
             return False
     
-    def stop_selfbot(self, user_id: str) -> bool:
+    def stop(self, user_id):
         session = db.execute("SELECT * FROM selfbot_sessions WHERE user_id = ?", (user_id,)).fetchone()
-        
         if session and session['process_id']:
             try:
                 import psutil
-                proc = psutil.Process(session['process_id'])
-                proc.terminate()
-                proc.wait(timeout=5)
+                psutil.Process(session['process_id']).terminate()
             except:
                 pass
-        
         db.execute("UPDATE selfbot_sessions SET status = 'offline', process_id = NULL WHERE user_id = ?", (user_id,))
         db.commit()
-        return True
     
-    def get_status(self, user_id: str) -> dict:
+    def status(self, user_id):
         session = db.execute("SELECT * FROM selfbot_sessions WHERE user_id = ?", (user_id,)).fetchone()
         if not session:
             return {'status': 'offline', 'running': False}
-        
         running = False
         if session['process_id']:
             try:
                 import psutil
-                proc = psutil.Process(session['process_id'])
-                running = proc.is_running()
+                running = psutil.Process(session['process_id']).is_running()
                 if not running:
                     db.execute("UPDATE selfbot_sessions SET status = 'offline', process_id = NULL WHERE user_id = ?", (user_id,))
                     db.commit()
             except:
                 db.execute("UPDATE selfbot_sessions SET status = 'offline', process_id = NULL WHERE user_id = ?", (user_id,))
                 db.commit()
-        
-        return {
-            'status': session['status'] if running else 'offline',
-            'running': running,
-            'started_at': session['started_at'],
-            'last_ping': session['last_ping']
-        }
+        return {'status': session['status'] if running else 'offline', 'running': running}
 
 manager = SelfBotManager()
+manager.cleanup()
 
-# ═══════════════════════════════════════════════════════
-# UI COMPONENTS
-# ═══════════════════════════════════════════════════════
-def build_panel_embed(uid, data, selfbot_status=None):
+# UI
+def build_embed(uid, data, sb=None):
     running = data["status"] == "running"
     color = 0x57F287 if running else 0xED4245
-    
     embed = discord.Embed(title="🎛️ Control Panel", color=color, timestamp=datetime.utcnow())
-    embed.add_field(name="📊 Panel Status", value="🟢 Running" if running else "🔴 Stopped", inline=True)
-    
-    if selfbot_status:
-        sb_emoji = "🟢" if selfbot_status['running'] else "🔴"
-        embed.add_field(name="🤖 SelfBot", value=f"{sb_emoji} {selfbot_status['status'].title()}", inline=True)
-    else:
-        embed.add_field(name="🤖 SelfBot", value="⚫ Offline", inline=True)
-    
+    embed.add_field(name="📊 Panel", value="🟢 Running" if running else "🔴 Stopped", inline=True)
+    embed.add_field(name="🤖 SelfBot", value=f"{'🟢' if sb and sb['running'] else '🔴'} {sb['status'].title() if sb else 'Offline'}", inline=True)
     embed.add_field(name="🏷️ Category", value=f"`{data['ticket_category']}`", inline=True)
     embed.add_field(name="⚡ Command", value=f"`{data['command']}`", inline=True)
     embed.add_field(name="🔄 Transfer", value=f"`{data['transfer_command']}`", inline=True)
@@ -221,27 +167,19 @@ class PanelView(ui.View):
         self.clear_items()
         data = get_panel(self.uid)
         running = data and data["status"] == "running"
-        sb_status = manager.get_status(str(self.uid))
+        sb = manager.status(str(self.uid))
         
-        start_btn = ui.Button(label="▶ Start Panel", style=discord.ButtonStyle.success, disabled=running)
-        stop_btn = ui.Button(label="⏹ Stop Panel", style=discord.ButtonStyle.danger, disabled=not running)
-        start_btn.callback = self.start_panel_cb
-        stop_btn.callback = self.stop_panel_cb
-        self.add_item(start_btn)
-        self.add_item(stop_btn)
+        start = ui.Button(label="▶ Start", style=discord.ButtonStyle.success, disabled=running)
+        stop = ui.Button(label="⏹ Stop", style=discord.ButtonStyle.danger, disabled=not running)
+        start.callback = self.start_cb; stop.callback = self.stop_cb
+        self.add_item(start); self.add_item(stop)
         
-        sb_running = sb_status['running']
-        start_sb = ui.Button(label="🚀 Start SelfBot", style=discord.ButtonStyle.success, disabled=sb_running, row=1)
-        stop_sb = ui.Button(label="🛑 Stop SelfBot", style=discord.ButtonStyle.danger, disabled=not sb_running, row=1)
-        login_sb = ui.Button(label="🔑 Login SelfBot", style=discord.ButtonStyle.primary, disabled=sb_running, row=1)
-        
-        start_sb.callback = self.start_sb_cb
-        stop_sb.callback = self.stop_sb_cb
-        login_sb.callback = self.login_sb_cb
-        
-        self.add_item(start_sb)
-        self.add_item(stop_sb)
-        self.add_item(login_sb)
+        sb_run = sb['running']
+        start_sb = ui.Button(label="🚀 Start SB", style=discord.ButtonStyle.success, disabled=sb_run, row=1)
+        stop_sb = ui.Button(label="🛑 Stop SB", style=discord.ButtonStyle.danger, disabled=not sb_run, row=1)
+        login_sb = ui.Button(label="🔑 Login", style=discord.ButtonStyle.primary, disabled=sb_run, row=1)
+        start_sb.callback = self.start_sb_cb; stop_sb.callback = self.stop_sb_cb; login_sb.callback = self.login_sb_cb
+        self.add_item(start_sb); self.add_item(stop_sb); self.add_item(login_sb)
         
         for key, label, emoji in [("ticket_category", "Category", "🏷️"), ("command", "Command", "⚡"), 
                                   ("transfer_command", "Transfer", "🔄"), ("custom_id", "ID", "🆔")]:
@@ -249,261 +187,146 @@ class PanelView(ui.View):
             btn.callback = self.make_edit_cb(key, label)
             self.add_item(btn)
     
-    async def start_panel_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.uid: 
-            return await interaction.response.send_message("❌ Not your panel", ephemeral=True)
+    async def start_cb(self, i):
+        if i.user.id != self.uid: return await i.response.send_message("❌ Not yours", ephemeral=True)
         data = upsert_panel(self.uid, status="running")
-        sb_status = manager.get_status(str(self.uid))
         self.refresh()
-        await interaction.response.edit_message(embed=build_panel_embed(self.uid, data, sb_status), view=self)
+        await i.response.edit_message(embed=build_embed(self.uid, data, manager.status(str(self.uid))), view=self)
         
-    async def stop_panel_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.uid: 
-            return await interaction.response.send_message("❌ Not your panel", ephemeral=True)
+    async def stop_cb(self, i):
+        if i.user.id != self.uid: return await i.response.send_message("❌ Not yours", ephemeral=True)
         data = upsert_panel(self.uid, status="stopped")
-        sb_status = manager.get_status(str(self.uid))
         self.refresh()
-        await interaction.response.edit_message(embed=build_panel_embed(self.uid, data, sb_status), view=self)
+        await i.response.edit_message(embed=build_embed(self.uid, data, manager.status(str(self.uid))), view=self)
     
-    async def start_sb_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.uid:
-            return await interaction.response.send_message("❌ Not your panel", ephemeral=True)
-        
-        session = db.execute("SELECT token FROM selfbot_sessions WHERE user_id = ?", (str(self.uid),)).fetchone()
-        if not session:
-            return await interaction.response.send_message("❌ Please login first with `/loginselfbot`", ephemeral=True)
-        
-        success = manager.start_selfbot(str(self.uid), session['token'])
-        if success:
-            await interaction.response.send_message("🚀 SelfBot starting...", ephemeral=True)
-        else:
-            await interaction.response.send_message("⚠️ SelfBot already running or failed to start", ephemeral=True)
+    async def start_sb_cb(self, i):
+        if i.user.id != self.uid: return await i.response.send_message("❌ Not yours", ephemeral=True)
+        s = db.execute("SELECT token FROM selfbot_sessions WHERE user_id = ?", (str(self.uid),)).fetchone()
+        if not s: return await i.response.send_message("❌ Login first with `/loginselfbot`", ephemeral=True)
+        manager.start(str(self.uid), s['token'])
+        await i.response.send_message("🚀 Starting...", ephemeral=True)
     
-    async def stop_sb_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.uid:
-            return await interaction.response.send_message("❌ Not your panel", ephemeral=True)
-        
-        manager.stop_selfbot(str(self.uid))
-        await interaction.response.send_message("🛑 SelfBot stopped", ephemeral=True)
+    async def stop_sb_cb(self, i):
+        if i.user.id != self.uid: return await i.response.send_message("❌ Not yours", ephemeral=True)
+        manager.stop(str(self.uid))
+        await i.response.send_message("🛑 Stopped", ephemeral=True)
     
-    async def login_sb_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.uid:
-            return await interaction.response.send_message("❌ Not your panel", ephemeral=True)
-        
-        modal = LoginModal(self)
-        await interaction.response.send_modal(modal)
+    async def login_sb_cb(self, i):
+        if i.user.id != self.uid: return await i.response.send_message("❌ Not yours", ephemeral=True)
+        await i.response.send_modal(LoginModal(self))
         
     def make_edit_cb(self, key, label):
-        async def callback(interaction: discord.Interaction):
-            if interaction.user.id != self.uid: 
-                return await interaction.response.send_message("❌ Not your panel", ephemeral=True)
-            modal = EditModal(self, key, label)
-            await interaction.response.send_modal(modal)
-        return callback
+        async def cb(i):
+            if i.user.id != self.uid: return await i.response.send_message("❌ Not yours", ephemeral=True)
+            await i.response.send_modal(EditModal(self, key, label))
+        return cb
 
-class LoginModal(ui.Modal, title="🔑 SelfBot Login"):
+class LoginModal(ui.Modal, title="🔑 Login"):
     def __init__(self, view):
         super().__init__()
         self.view = view
-        self.token_input = ui.TextInput(
-            label="Discord Token",
-            placeholder="Enter your alt account token...",
-            required=True,
-            min_length=10,
-            max_length=100
-        )
-        self.add_item(self.token_input)
+        self.inp = ui.TextInput(label="Token", placeholder="Discord token...", required=True, min_length=10, max_length=100)
+        self.add_item(self.inp)
     
-    async def on_submit(self, interaction: discord.Interaction):
-        token = self.token_input.value
-        
-        if not re.match(r'^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$', token):
-            return await interaction.response.send_message("❌ Invalid token format", ephemeral=True)
-        
-        db.execute("""
-            INSERT OR REPLACE INTO selfbot_sessions (user_id, token, status, started_at, last_ping, settings)
-            VALUES (?, ?, 'offline', NULL, NULL, '{}')
-        """, (str(interaction.user.id), token))
+    async def on_submit(self, i):
+        t = self.inp.value
+        if not re.match(r'^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$', t):
+            return await i.response.send_message("❌ Invalid format", ephemeral=True)
+        db.execute("INSERT OR REPLACE INTO selfbot_sessions (user_id, token, status) VALUES (?, ?, 'offline')", (str(i.user.id), t))
         db.commit()
-        
-        await interaction.response.send_message("✅ Token saved! Click 🚀 Start SelfBot to launch", ephemeral=True)
+        await i.response.send_message("✅ Saved! Click 🚀 Start SB", ephemeral=True)
 
 class EditModal(ui.Modal):
     def __init__(self, view, key, label):
         super().__init__(title=f"Edit {label}")
-        self.view = view
-        self.key = key
-        self.input = ui.TextInput(label=label, max_length=100, required=True)
-        self.add_item(self.input)
+        self.view = view; self.key = key
+        self.inp = ui.TextInput(label=label, max_length=100, required=True)
+        self.add_item(self.inp)
         
-    async def on_submit(self, interaction: discord.Interaction):
-        kwargs = {self.key: self.input.value}
-        data = upsert_panel(self.view.uid, **kwargs)
-        sb_status = manager.get_status(str(interaction.user.id))
+    async def on_submit(self, i):
+        data = upsert_panel(self.view.uid, **{self.key: self.inp.value})
         self.view.refresh()
-        await interaction.response.edit_message(embed=build_panel_embed(self.view.uid, data, sb_status), view=self.view)
+        await i.response.edit_message(embed=build_embed(self.view.uid, data, manager.status(str(i.user.id))), view=self.view)
 
-# ═══════════════════════════════════════════════════════
-# BOT SETUP - CREATE CLIENT
-# ═══════════════════════════════════════════════════════
+# Bot setup
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f"✅✅✅ BOT LOGGED IN AS: {bot.user} (ID: {bot.user.id}) ✅✅✅")
-    print(f"🔑 Token used: {TOKEN[:15]}...")
-    
-    # Sync commands
+    print(f"✅✅✅ LOGGED IN: {bot.user} (ID: {bot.user.id}) ✅✅✅", flush=True)
     try:
         synced = await bot.tree.sync()
-        print(f"✅ Synced {len(synced)} commands")
-        for cmd in synced:
-            print(f"  - /{cmd.name}")
+        print(f"✅ Synced {len(synced)} commands", flush=True)
     except Exception as e:
-        print(f"❌ Failed to sync: {e}")
+        print(f"❌ Sync failed: {e}", flush=True)
 
-@bot.tree.command(name="generatekey", description="🔑 Generate access key (Owner only)")
-@app_commands.describe(duration="Duration: 30m, 1h, 7d")
-async def generatekey(interaction: discord.Interaction, duration: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    if interaction.user.id != OWNER_ID:
-        return await interaction.followup.send("❌ Owner only", ephemeral=True)
-    
+@bot.tree.command(name="generatekey", description="🔑 Generate key (Owner only)")
+@app_commands.describe(duration="30m, 1h, 7d")
+async def cmd_genkey(i: discord.Interaction, duration: str):
+    await i.response.defer(ephemeral=True)
+    if i.user.id != OWNER_ID:
+        return await i.followup.send("❌ Owner only", ephemeral=True)
     ms = parse_duration(duration)
-    if not ms: 
-        return await interaction.followup.send("❌ Invalid format. Use: 30m, 1h, 7d", ephemeral=True)
-    
+    if not ms: return await i.followup.send("❌ Invalid format", ephemeral=True)
     key = gen_key()
-    db.execute("INSERT INTO keys VALUES (?,?,?,?,?,NULL,0)", (key, str(interaction.user.id), now_ms(), now_ms() + ms, None))
+    db.execute("INSERT INTO keys VALUES (?,?,?,?,?,NULL,0)", (key, str(i.user.id), now_ms(), now_ms() + ms, None))
     db.commit()
-    
     embed = discord.Embed(title="🔑 Key Generated", color=0x57F287)
     embed.add_field(name="Key", value=f"```{key}```")
     embed.add_field(name="Expires", value=f"<t:{(now_ms() + ms)//1000}:R>")
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await i.followup.send(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="redeemkey", description="✅ Redeem access key")
-@app_commands.describe(key="Your access key")
-async def redeemkey(interaction: discord.Interaction, key: str):
-    await interaction.response.defer(ephemeral=True)
-    
+@bot.tree.command(name="redeemkey", description="✅ Redeem key")
+@app_commands.describe(key="Your key")
+async def cmd_redeem(i: discord.Interaction, key: str):
+    await i.response.defer(ephemeral=True)
     row = db.execute("SELECT * FROM keys WHERE key = ?", (key,)).fetchone()
-    if not row: 
-        return await interaction.followup.send("❌ Invalid key", ephemeral=True)
-    if row["revoked"]: 
-        return await interaction.followup.send("❌ Revoked", ephemeral=True)
-    if row["expires_at"] <= now_ms(): 
-        return await interaction.followup.send("❌ Expired", ephemeral=True)
-    if row["redeemed_by"]: 
-        return await interaction.followup.send("❌ Already used", ephemeral=True)
-    
-    uid = str(interaction.user.id)
+    if not row: return await i.followup.send("❌ Invalid", ephemeral=True)
+    if row["revoked"]: return await i.followup.send("❌ Revoked", ephemeral=True)
+    if row["expires_at"] <= now_ms(): return await i.followup.send("❌ Expired", ephemeral=True)
+    if row["redeemed_by"]: return await i.followup.send("❌ Used", ephemeral=True)
+    uid = str(i.user.id)
     db.execute("UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE key = ?", (uid, now_ms(), key))
     db.execute("INSERT OR REPLACE INTO authorized_users VALUES (?,?,?,?)", (uid, key, now_ms(), row["expires_at"]))
     db.commit()
-    
-    await interaction.followup.send("✅ Access granted! Use `/panel`", ephemeral=True)
+    await i.followup.send("✅ Access granted! Use `/panel`", ephemeral=True)
 
-@bot.tree.command(name="loginselfbot", description="🔑 Login your selfbot alt account")
-async def loginselfbot(interaction: discord.Interaction):
-    if interaction.user.id != OWNER_ID and not is_authorized(interaction.user.id):
-        return await interaction.response.send_message("❌ Redeem key first", ephemeral=True)
-    
-    modal = LoginModal(PanelView(interaction.user.id))
-    await interaction.response.send_modal(modal)
+@bot.tree.command(name="loginselfbot", description="🔑 Login alt account")
+async def cmd_login(i: discord.Interaction):
+    if i.user.id != OWNER_ID and not is_authorized(i.user.id):
+        return await i.response.send_message("❌ Redeem key first", ephemeral=True)
+    await i.response.send_modal(LoginModal(PanelView(i.user.id)))
 
-@bot.tree.command(name="panel", description="🎛️ Open control panel")
-async def panel(interaction: discord.Interaction):
-    if interaction.user.id != OWNER_ID and not is_authorized(interaction.user.id):
-        return await interaction.response.send_message("❌ Redeem key first: `/redeemkey`", ephemeral=True)
-    
-    data = get_panel(interaction.user.id) or upsert_panel(interaction.user.id)
-    sb_status = manager.get_status(str(interaction.user.id))
-    
-    await interaction.response.send_message(
-        embed=build_panel_embed(interaction.user.id, data, sb_status), 
-        view=PanelView(interaction.user.id), 
-        ephemeral=True
-    )
+@bot.tree.command(name="panel", description="🎛️ Control panel")
+async def cmd_panel(i: discord.Interaction):
+    if i.user.id != OWNER_ID and not is_authorized(i.user.id):
+        return await i.response.send_message("❌ Redeem key first", ephemeral=True)
+    data = get_panel(i.user.id) or upsert_panel(i.user.id)
+    await i.response.send_message(embed=build_embed(i.user.id, data, manager.status(str(i.user.id))), view=PanelView(i.user.id), ephemeral=True)
 
-@bot.tree.command(name="selfbotstatus", description="📊 Check selfbot status")
-async def selfbotstatus(interaction: discord.Interaction):
-    if interaction.user.id != OWNER_ID and not is_authorized(interaction.user.id):
-        return await interaction.response.send_message("❌ Redeem key first", ephemeral=True)
-    
-    status = manager.get_status(str(interaction.user.id))
-    
-    embed = discord.Embed(title="🤖 SelfBot Status", color=0x57F287 if status['running'] else 0xED4245)
-    embed.add_field(name="Status", value=status['status'].title(), inline=True)
-    embed.add_field(name="Running", value="✅ Yes" if status['running'] else "❌ No", inline=True)
-    
-    if status['started_at']:
-        embed.add_field(name="Started", value=f"<t:{status['started_at']//1000}:R>", inline=True)
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+@bot.tree.command(name="selfbotstatus", description="📊 Check status")
+async def cmd_status(i: discord.Interaction):
+    if i.user.id != OWNER_ID and not is_authorized(i.user.id):
+        return await i.response.send_message("❌ Redeem key first", ephemeral=True)
+    s = manager.status(str(i.user.id))
+    embed = discord.Embed(title="🤖 SelfBot Status", color=0x57F287 if s['running'] else 0xED4245)
+    embed.add_field(name="Status", value=s['status'].title(), inline=True)
+    embed.add_field(name="Running", value="✅" if s['running'] else "❌", inline=True)
+    if s['started_at']: embed.add_field(name="Started", value=f"<t:{s['started_at']//1000}:R>", inline=True)
+    await i.response.send_message(embed=embed, ephemeral=True)
 
 # ═══════════════════════════════════════════════════════
-# API SERVER FOR SELFBOT COMMUNICATION
+# START BOT - THIS IS THE LOGIN CALL
 # ═══════════════════════════════════════════════════════
-from aiohttp import web
+print("🔌 Connecting to Discord...", flush=True)
 
-async def api_handler(request):
-    path = request.path
-    
-    if path.startswith('/settings/'):
-        user_id = path.split('/')[-1]
-        panel = get_panel(user_id)
-        if panel:
-            return web.json_response({
-                'status': panel['status'],
-                'ticket_category': panel['ticket_category'],
-                'command': panel['command'],
-                'transfer_command': panel['transfer_command'],
-                'custom_id': panel['custom_id']
-            })
-    
-    return web.json_response({'error': 'not found'}, status=404)
-
-async def start_api_server():
-    app = web.Application()
-    app.router.add_get('/settings/{user_id}', api_handler)
-    app.router.add_get('/health', lambda r: web.Response(text='OK'))
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, 'localhost', 8080)
-    await site.start()
-    print("✅ API server on localhost:8080")
-
-# ═══════════════════════════════════════════════════════
-# MAIN - BOT LOGIN AND RUN
-# ═══════════════════════════════════════════════════════
-def main():
-    # Start API server in background thread
-    loop = asyncio.new_event_loop()
-    
-    def run_api():
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(start_api_server())
-        loop.run_forever()
-    
-    api_thread = threading.Thread(target=run_api, daemon=True)
-    api_thread.start()
-    print("✅ API server started in background")
-    
-    # ═══ BOT LOGIN HERE ═══
-    # client.run(TOKEN) blocks and runs the bot until disconnected
-    print(f"🔌 Connecting to Discord with token: {TOKEN[:15]}...")
-    
-    try:
-        bot.run(TOKEN)  # <-- THIS IS THE LOGIN CALL
-    except discord.LoginFailure as e:
-        print(f"❌ Login failed: {e}")
-        print("Check your DISCORD_TOKEN")
-    except Exception as e:
-        print(f"❌ Error: {e}")
-
-if __name__ == '__main__':
-    main()
+try:
+    # client.run(TOKEN) - blocks forever and runs the bot
+    bot.run(TOKEN)
+except discord.LoginFailure as e:
+    print(f"❌ Login failed: {e}", flush=True)
+    sys.exit(1)
+except Exception as e:
+    print(f"❌ Error: {e}", flush=True)
+    raise
