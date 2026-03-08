@@ -1,493 +1,396 @@
-import asyncio
-import aiohttp
-from aiohttp import web
-import websockets
-import json
-import time
-import random
 import os
 import sys
-from typing import Optional, Dict, Any
+import asyncio
+import json
+import random
+import time
+import base64
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 import logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('SelfBot')
 
-# ─── Config ───
+# ─── INSTANT HEALTHCHECK SERVER ───
 PORT = int(os.environ.get('PORT', 8080))
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
+    
+    def log_message(self, format, *args):
+        pass  # Suppress logs
+
+def start_health_server():
+    """Start blocking health server in background thread immediately"""
+    server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info(f'✅ Health server running on port {PORT}')
+
+# Start health server BEFORE anything else
+start_health_server()
+
+# ─── CONFIG ───
 CONFIG = {
     'token': os.environ.get('SELFBOT_TOKEN'),
-    'owner_id': os.environ.get('OWNER_ID', '1479770170389172285'),
     'razorcap_key': os.environ.get('RAZORCAP_API_KEY', '44b5a90f-182f-4c67-b219-ef8dfd33d7a1'),
-    'razorcap_url': 'https://api.razorcap.cc/solve',
     'proxies': [p.strip() for p in os.environ.get('PROXIES', '').split(',') if p.strip()],
-    'bot_api_url': os.environ.get('BOT_API_URL', 'http://localhost:8080'),
-    'claim_delay_min': 800,
-    'claim_delay_max': 2500,
+    'claim_delay': (800, 2500)
 }
 
-# ─── Healthcheck Server ───
-async def start_health_server():
-    """Start healthcheck server immediately"""
-    app = web.Application()
-    
-    async def health(request):
-        return web.Response(text='OK', status=200)
-    
-    async def root(request):
-        return web.Response(text='SelfBot Running', status=200)
-    
-    app.router.add_get('/health', health)
-    app.router.add_get('/', root)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    
-    # Bind to 0.0.0.0 and Railway's PORT
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    
-    logger.info(f'✅ Healthcheck server running on port {PORT}')
-    return runner
+# ─── IMPORTS (after health server starts) ───
+try:
+    import aiohttp
+    import websockets
+    import aiohttp_socks
+except ImportError as e:
+    logger.error(f"Missing dependency: {e}")
+    logger.info("Installing: pip install aiohttp websockets aiohttp-socks")
+    sys.exit(1)
 
-# ─── Proxy Rotator ───
+# ─── PROXY ROTATOR ───
 class ProxyRotator:
     def __init__(self):
         self.proxies = CONFIG['proxies']
-        self.current = 0
         self.working = []
-        
-    async def test_proxy(self, proxy: str) -> bool:
-        try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
-                    'https://discord.com/api/v9/users/@me',
-                    proxy=proxy,
-                    headers={'Authorization': CONFIG['token']}
-                ) as resp:
-                    return resp.status == 200
-        except:
-            return False
+        self.index = 0
     
-    async def get_working_proxy(self) -> Optional[str]:
+    async def get(self):
         if not self.proxies:
             return None
         if not self.working:
             for p in self.proxies:
-                if await self.test_proxy(p):
-                    self.working.append(p)
+                try:
+                    timeout = aiohttp.ClientTimeout(total=5)
+                    async with aiohttp.ClientSession(timeout=timeout) as s:
+                        async with s.get('https://discord.com/api/v9/users/@me', proxy=p, headers={'Authorization': CONFIG['token']}) as r:
+                            if r.status == 200:
+                                self.working.append(p)
+                except:
+                    pass
         if not self.working:
             return None
-        proxy = self.working[self.current % len(self.working)]
-        self.current += 1
-        return proxy
+        p = self.working[self.index % len(self.working)]
+        self.index += 1
+        return p
 
-# ─── Fingerprint ───
+# ─── FINGERPRINT ───
 class Fingerprint:
     def __init__(self):
-        self.browsers = ['Chrome/120.0.0.0', 'Firefox/121.0']
-        self.systems = ['Windows NT 10.0; Win64; x64', 'Macintosh; Intel Mac OS X 10_15_7']
-        self.locales = ['en-US', 'en-GB']
-        self.timezones = ['America/New_York', 'Europe/London']
         self.rotate()
-        
-    def rotate(self):
-        self.ua = f"Mozilla/5.0 ({random.choice(self.systems)}) AppleWebKit/537.36 (KHTML, like Gecko) {random.choice(self.browsers)}"
-        self.locale = random.choice(self.locales)
-        self.timezone = random.choice(self.timezones)
-        self.super_properties = self._encode_super_props()
-        
-    def _encode_super_props(self) -> str:
-        import base64
-        props = {
-            "os": "Windows",
-            "browser": "Chrome",
-            "device": "",
-            "system_locale": self.locale,
-            "browser_user_agent": self.ua,
-            "browser_version": "120.0.0.0",
-            "os_version": "10",
-            "referrer": "",
-            "referring_domain": "",
-            "referrer_current": "",
-            "referring_domain_current": "",
-            "release_channel": "stable",
-            "client_build_number": random.randint(240000, 250000),
-            "client_event_source": None
-        }
-        return base64.b64encode(json.dumps(props).encode()).decode()
     
-    def get_headers(self) -> Dict[str, str]:
-        return {
-            'User-Agent': self.ua,
-            'Accept': '*/*',
+    def rotate(self):
+        self.ua = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(120, 125)}.0.0.0 Safari/537.36"
+        self.locale = random.choice(['en-US', 'en-GB', 'fr-FR'])
+        self.timezone = random.choice(['America/New_York', 'Europe/London'])
+        props = {
+            "os": "Windows", "browser": "Chrome", "device": "",
+            "system_locale": self.locale, "browser_user_agent": self.ua,
+            "browser_version": "120.0.0.0", "os_version": "10",
+            "referrer": "", "referring_domain": "",
+            "release_channel": "stable", "client_build_number": random.randint(240000, 250000)
+        }
+        self.super = base64.b64encode(json.dumps(props).encode()).decode()
+    
+    def headers(self, auth=None):
+        h = {
+            'User-Agent': self.ua, 'Accept': '*/*',
             'Accept-Language': f'{self.locale},en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://discord.com/',
-            'Origin': 'https://discord.com',
+            'Referer': 'https://discord.com/', 'Origin': 'https://discord.com',
             'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
-            'X-Debug-Options': 'bugReporterEnabled',
-            'X-Discord-Locale': self.locale,
-            'X-Discord-Timezone': self.timezone,
-            'X-Super-Properties': self.super_properties
+            'Sec-Ch-Ua-Mobile': '?0', 'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Site': 'same-origin',
+            'X-Debug-Options': 'bugReporterEnabled', 'X-Discord-Locale': self.locale,
+            'X-Discord-Timezone': self.timezone, 'X-Super-Properties': self.super
         }
+        if auth:
+            h['Authorization'] = auth
+        return h
 
-# ─── CAPTCHA Solver ───
+# ─── CAPTCHA SOLVER ───
 class CaptchaSolver:
-    def __init__(self, proxy_rotator: ProxyRotator, fingerprint: Fingerprint):
-        self.proxy_rotator = proxy_rotator
-        self.fp = fingerprint
-        self.session: Optional[aiohttp.ClientSession] = None
-        
+    def __init__(self, proxy, fp):
+        self.proxy = proxy
+        self.fp = fp
+        self.session = None
+    
     async def init(self):
         self.session = aiohttp.ClientSession()
     
-    async def solve_razorcap(self, site_key: str, page_url: str, captcha_type: str = 'hcaptcha_enterprise', rqdata: Optional[str] = None) -> Optional[str]:
+    async def razorcap(self, site_key, page_url, rqdata=None):
         try:
-            proxy = await self.proxy_rotator.get_working_proxy()
+            proxy = await self.proxy.get()
             payload = {
-                'type': captcha_type,
+                'type': 'hcaptcha_enterprise',
                 'websiteURL': page_url,
                 'websiteKey': site_key,
                 'rqdata': rqdata,
                 'proxy': proxy
             }
-            payload = {k: v for k, v in payload.items() if v is not None}
+            payload = {k: v for k, v in payload.items() if v}
             
-            headers = {
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {CONFIG["razorcap_key"]}',
-                'User-Agent': self.fp.ua
-            }
-            
-            logger.info('Sending to RazorCap...')
-            async with self.session.post(CONFIG['razorcap_url'], json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                data = await resp.json()
+            async with self.session.post(
+                'https://api.razorcap.cc/solve',
+                json=payload,
+                headers={'Authorization': f'Bearer {CONFIG["razorcap_key"]}', 'User-Agent': self.fp.ua},
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as r:
+                data = await r.json()
                 if data.get('error'):
                     return None
-                return await self._poll_razorcap(data.get('taskId'), proxy)
+                return await self._poll(data.get('taskId'))
         except Exception as e:
-            logger.error(f'RazorCap error: {e}')
+            logger.error(f'RazorCap: {e}')
             return None
     
-    async def _poll_razorcap(self, task_id: str, proxy: Optional[str], max_attempts: int = 60) -> Optional[str]:
-        for _ in range(max_attempts):
+    async def _poll(self, task_id, max=60):
+        for _ in range(max):
             await asyncio.sleep(2)
             try:
-                headers = {'Authorization': f'Bearer {CONFIG["razorcap_key"]}'}
-                async with self.session.get(f'{CONFIG["razorcap_url"]}/result/{task_id}', headers=headers) as resp:
-                    data = await resp.json()
+                async with self.session.get(
+                    f'https://api.razorcap.cc/solve/result/{task_id}',
+                    headers={'Authorization': f'Bearer {CONFIG["razorcap_key"]}'}
+                ) as r:
+                    data = await r.json()
                     if data.get('status') == 'ready':
-                        return data.get('solution', {}).get('token') or data.get('solution')
+                        return data.get('solution', {}).get('token')
             except:
                 pass
         return None
     
-    async def solve_2captcha(self, site_key: str, page_url: str) -> Optional[str]:
-        api_key = os.environ.get('2CAPTCHA_API_KEY')
-        if not api_key:
+    async def twocaptcha(self, site_key, page_url):
+        key = os.environ.get('2CAPTCHA_API_KEY')
+        if not key:
             return None
         try:
             async with self.session.get('http://2captcha.com/in.php', params={
-                'key': api_key, 'method': 'hcaptcha', 'sitekey': site_key, 'pageurl': page_url, 'json': 1
-            }) as resp:
-                data = await resp.json()
+                'key': key, 'method': 'hcaptcha', 'sitekey': site_key, 'pageurl': page_url, 'json': 1
+            }) as r:
+                data = await r.json()
                 if data.get('status') != 1:
                     return None
-                captcha_id = data.get('request')
+                cid = data.get('request')
             
             for _ in range(30):
                 await asyncio.sleep(5)
                 async with self.session.get('http://2captcha.com/res.php', params={
-                    'key': api_key, 'action': 'get', 'id': captcha_id, 'json': 1
-                }) as resp:
-                    data = await resp.json()
+                    'key': key, 'action': 'get', 'id': cid, 'json': 1
+                }) as r:
+                    data = await r.json()
                     if data.get('status') == 1:
                         return data.get('request')
         except Exception as e:
-            logger.error(f'2Captcha error: {e}')
+            logger.error(f'2Captcha: {e}')
         return None
     
-    async def solve_browser(self, site_key: str, page_url: str) -> Optional[str]:
+    async def browser(self, site_key, page_url):
         try:
             from playwright.async_api import async_playwright
-            proxy = await self.proxy_rotator.get_working_proxy()
+            proxy = await self.proxy.get()
+            args = ['--no-sandbox', '--disable-setuid-sandbox']
+            if proxy:
+                args.append(f'--proxy-server={proxy}')
             
             async with async_playwright() as p:
-                args = ['--no-sandbox', '--disable-setuid-sandbox']
-                if proxy:
-                    args.append(f'--proxy-server={proxy}')
-                
                 browser = await p.chromium.launch(headless=True, args=args)
                 context = await browser.new_context(
                     user_agent=self.fp.ua,
                     viewport={'width': 1920, 'height': 1080},
-                    locale=self.fp.locale,
-                    timezone_id=self.fp.timezone
+                    locale=self.fp.locale
                 )
-                
                 page = await context.new_page()
-                await page.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
-                    window.chrome = { runtime: {} };
-                """)
-                
+                await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 await page.goto(page_url, wait_until='networkidle')
                 
                 try:
                     await page.wait_for_selector('iframe[src*="hcaptcha"]', timeout=10000)
-                    frames = page.frames
-                    hcaptcha_frame = next((f for f in frames if 'hcaptcha' in f.url), None)
-                    if hcaptcha_frame:
-                        await hcaptcha_frame.click('#checkbox', timeout=5000)
-                        await asyncio.sleep(5)
+                    for frame in page.frames:
+                        if 'hcaptcha' in frame.url:
+                            await frame.click('#checkbox', timeout=5000)
+                            await asyncio.sleep(5)
+                            break
                     
-                    token = await page.evaluate('''() => document.querySelector('textarea[name="h-captcha-response"]')?.value''')
+                    token = await page.evaluate('() => document.querySelector(\'textarea[name="h-captcha-response"]\')?.value')
                     await browser.close()
                     if token:
-                        logger.info('Browser solve success')
                         return token
                 except:
                     pass
                 await browser.close()
         except ImportError:
-            logger.debug('Playwright not installed')
+            pass
         except Exception as e:
-            logger.error(f'Browser error: {e}')
+            logger.error(f'Browser: {e}')
         return None
     
-    async def solve(self, site_key: str, page_url: str, captcha_type: str = 'hcaptcha_enterprise', rqdata: Optional[str] = None) -> str:
+    async def solve(self, site_key, page_url, rqdata=None):
         await self.init()
         
-        result = await self.solve_razorcap(site_key, page_url, captcha_type, rqdata)
-        if result:
-            return result
-            
-        result = await self.solve_2captcha(site_key, page_url)
-        if result:
-            return result
-            
-        result = await self.solve_browser(site_key, page_url)
-        if result:
-            return result
-            
+        for method in [self.razorcap, self.twocaptcha, self.browser]:
+            result = await method(site_key, page_url, rqdata) if method != self.twocaptcha else await method(site_key, page_url)
+            if result:
+                return result
+        
         raise Exception('All solvers failed')
 
-# ─── Discord SelfBot ───
-class DiscordSelfBot:
+# ─── DISCORD SELFBOT ───
+class SelfBot:
     def __init__(self):
         self.token = CONFIG['token']
-        self.proxy_rotator = ProxyRotator()
+        self.proxy = ProxyRotator()
         self.fp = Fingerprint()
-        self.captcha = CaptchaSolver(self.proxy_rotator, self.fp)
+        self.captcha = CaptchaSolver(self.proxy, self.fp)
         self.ws = None
         self.session_id = None
-        self.heartbeat_interval = None
-        self.gateway_url = 'wss://gateway.discord.gg/?v=9&encoding=json'
-        self.settings = {
-            'status': 'stopped',
-            'category_id': None,
-            'claim_cmd': 'claim',
-            'transfer_cmd': None,
-            'transfer_id': None
-        }
+        self.heartbeat = None
+        self.settings = {'status': 'stopped', 'category_id': None, 'claim_cmd': 'claim', 'transfer_cmd': None, 'transfer_id': None}
         self.claimed = set()
-        self.guilds = {}
-        self.http_session: Optional[aiohttp.ClientSession] = None
+        self.http = None
         self.running = False
-        
+    
     async def start(self):
         if not self.token:
-            logger.error('SELFBOT_TOKEN not set!')
+            logger.error('No SELFBOT_TOKEN')
             return
-            
-        await self.captcha.init()
-        self.http_session = aiohttp.ClientSession(headers={
-            'Authorization': self.token,
-            **self.fp.get_headers()
-        })
         
-        me = await self.api_request('GET', '/users/@me')
+        await self.captcha.init()
+        self.http = aiohttp.ClientSession(headers=self.fp.headers(self.token))
+        
+        me = await self.api('GET', '/users/@me')
         if not me:
             logger.error('Invalid token')
             return
-            
-        logger.info(f'Started as {me.get("username")}')
+        
+        logger.info(f'Logged in as {me.get("username")}')
         self.running = True
         
         await asyncio.gather(
-            self.gateway_loop(),
+            self.gateway(),
             self.poll_settings(),
-            self.rotate_fingerprint()
+            self.rotate_fp()
         )
     
-    async def api_request(self, method: str, endpoint: str, json_data: dict = None) -> Optional[dict]:
+    async def api(self, method, endpoint, json=None):
         try:
             url = f'https://discord.com/api/v9{endpoint}'
-            async with self.http_session.request(method, url, json=json_data) as resp:
-                if resp.status == 204:
+            async with self.http.request(method, url, json=json) as r:
+                if r.status == 204:
                     return {}
-                if resp.status == 429:
-                    retry = int(resp.headers.get('Retry-After', 1))
-                    await asyncio.sleep(retry)
-                    return await self.api_request(method, endpoint, json_data)
-                if resp.status >= 400:
+                if r.status == 429:
+                    await asyncio.sleep(int(r.headers.get('Retry-After', 1)))
+                    return await self.api(method, endpoint, json)
+                if r.status >= 400:
                     return None
-                return await resp.json()
+                return await r.json()
         except Exception as e:
-            logger.error(f'Request error: {e}')
+            logger.error(f'API: {e}')
             return None
     
-    async def send_message(self, channel_id: str, content: str) -> bool:
-        result = await self.api_request('POST', f'/channels/{channel_id}/messages', {
+    async def send(self, channel_id, content):
+        return await self.api('POST', f'/channels/{channel_id}/messages', {
             'content': content,
-            'nonce': str(random.randint(1000000000000000000, 9999999999999999999)),
+            'nonce': str(random.randint(10**18, 10**19 - 1)),
             'tts': False
         })
-        return result is not None
     
-    async def gateway_loop(self):
+    async def gateway(self):
         while self.running:
             try:
-                async with websockets.connect(self.gateway_url, ping_interval=None) as ws:
+                async with websockets.connect('wss://gateway.discord.gg/?v=9&encoding=json') as ws:
                     self.ws = ws
                     await self.identify()
                     
-                    async for message in ws:
-                        await self.handle_gateway_msg(json.loads(message))
+                    async for msg in ws:
+                        await self.handle(json.loads(msg))
             except Exception as e:
-                logger.error(f'Gateway error: {e}')
+                logger.error(f'Gateway: {e}')
                 await asyncio.sleep(5)
     
     async def identify(self):
-        payload = {
+        await self.ws.send(json.dumps({
             'op': 2,
             'd': {
                 'token': self.token,
                 'properties': {
-                    'os': 'Windows',
-                    'browser': 'Chrome',
-                    'device': '',
-                    'system_locale': self.fp.locale,
-                    'browser_user_agent': self.fp.ua,
-                    'browser_version': '120.0.0.0',
-                    'os_version': '10',
-                    'referrer': '',
-                    'referring_domain': '',
-                    'referrer_current': '',
-                    'referring_domain_current': '',
-                    'release_channel': 'stable',
-                    'client_build_number': 245666,
-                    'client_event_source': None
+                    'os': 'Windows', 'browser': 'Chrome', 'device': '',
+                    'system_locale': self.fp.locale, 'browser_user_agent': self.fp.ua,
+                    'browser_version': '120.0.0.0', 'os_version': '10',
+                    'referrer': '', 'referring_domain': '',
+                    'release_channel': 'stable', 'client_build_number': 245666
                 },
                 'presence': {'status': 'online', 'since': 0, 'activities': [], 'afk': False},
-                'compress': False,
-                'client_state': {
-                    'guild_versions': {},
-                    'highest_last_message_id': '0',
-                    'read_state_version': 0,
-                    'user_guild_settings_version': -1,
-                    'user_settings_version': -1,
-                    'private_channels_version': '0',
-                    'api_code_version': 0
-                }
+                'compress': False
             }
-        }
-        await self.ws.send(json.dumps(payload))
+        }))
     
-    async def handle_gateway_msg(self, msg: dict):
+    async def handle(self, msg):
         op = msg.get('op')
         d = msg.get('d', {})
         
         if op == 10:
-            self.heartbeat_interval = d['heartbeat_interval']
-            asyncio.create_task(self.heartbeat_loop())
-            
+            self.heartbeat = d['heartbeat_interval']
+            asyncio.create_task(self.beat())
+        
         elif op == 0:
             t = msg.get('t')
             if t == 'READY':
                 self.session_id = d.get('session_id')
-                for guild in d.get('guilds', []):
-                    self.guilds[guild['id']] = guild
-            elif t == 'GUILD_CREATE':
-                self.guilds[d['id']] = d
             elif t == 'CHANNEL_CREATE':
-                await self.handle_channel_create(d)
+                await self.on_channel(d)
     
-    async def heartbeat_loop(self):
+    async def beat(self):
         while True:
-            await asyncio.sleep(self.heartbeat_interval / 1000)
+            await asyncio.sleep(self.heartbeat / 1000)
             try:
                 await self.ws.send(json.dumps({'op': 1, 'd': self.session_id}))
             except:
                 break
     
-    async def handle_channel_create(self, channel: dict):
+    async def on_channel(self, ch):
         if self.settings['status'] != 'running':
             return
-        if not self.settings['category_id']:
+        if not self.settings['category_id'] or str(ch.get('parent_id')) != str(self.settings['category_id']):
             return
-        if str(channel.get('parent_id')) != str(self.settings['category_id']):
+        if ch['id'] in self.claimed:
             return
-        if channel['id'] in self.claimed:
-            return
-            
-        logger.info(f'New ticket: {channel.get("name")}')
         
-        delay = random.randint(CONFIG['claim_delay_min'], CONFIG['claim_delay_max'])
-        await asyncio.sleep(delay / 1000)
+        logger.info(f'New ticket: {ch.get("name")}')
+        await asyncio.sleep(random.randint(*CONFIG['claim_delay']) / 1000)
         
-        if await self.send_message(channel['id'], self.settings['claim_cmd']):
-            self.claimed.add(channel['id'])
-            logger.info(f'Claimed: {channel["id"]}')
+        if await self.send(ch['id'], self.settings['claim_cmd']):
+            self.claimed.add(ch['id'])
+            logger.info(f'Claimed {ch["id"]}')
             
             if self.settings['transfer_cmd'] and self.settings['transfer_id']:
                 await asyncio.sleep(random.uniform(1, 2))
-                await self.send_message(channel['id'], f'{self.settings["transfer_cmd"]} {self.settings["transfer_id"]}')
+                await self.send(ch['id'], f'{self.settings["transfer_cmd"]} {self.settings["transfer_id"]}')
     
     async def poll_settings(self):
         while self.running:
             try:
-                async with self.http_session.get(f'{CONFIG["bot_api_url"]}/settings/{self.token.split(".")[0]}') as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        self.settings.update(data)
+                async with self.http.get(f'{os.environ.get("BOT_API_URL", "http://localhost:8080")}/settings/{self.token.split(".")[0]}') as r:
+                    if r.status == 200:
+                        self.settings.update(await r.json())
             except:
                 pass
             await asyncio.sleep(2)
     
-    async def rotate_fingerprint(self):
+    async def rotate_fp(self):
         while self.running:
             await asyncio.sleep(300)
             self.fp.rotate()
-            self.http_session.headers.update(self.fp.get_headers())
+            self.http.headers.update(self.fp.headers(self.token))
 
-# ─── Main ───
+# ─── MAIN ───
 async def main():
-    # Start health server FIRST (immediately)
-    health_runner = await start_health_server()
-    
-    # Then start the bot
-    bot = DiscordSelfBot()
-    
-    try:
-        await bot.start()
-    except Exception as e:
-        logger.error(f'Bot error: {e}')
-        # Keep health server running even if bot fails
-        while True:
-            await asyncio.sleep(3600)
+    bot = SelfBot()
+    await bot.start()
 
 if __name__ == '__main__':
     asyncio.run(main())
