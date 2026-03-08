@@ -9,6 +9,7 @@ import time
 import asyncio
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -333,38 +334,58 @@ bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
     print(f"✅ Bot online as {bot.user}")
+    # Sync commands in background
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} commands")
+    except Exception as e:
+        print(f"❌ Failed to sync commands: {e}")
 
 @bot.tree.command(name="generatekey", description="🔑 Generate access key (Owner only)")
 @app_commands.describe(duration="Duration: 30m, 1h, 7d")
 async def generatekey(interaction: discord.Interaction, duration: str):
+    # Defer immediately to prevent timeout
+    await interaction.response.defer(ephemeral=True)
+    
     if interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("❌ Owner only", ephemeral=True)
+        return await interaction.followup.send("❌ Owner only", ephemeral=True)
+    
     ms = parse_duration(duration)
-    if not ms: return await interaction.response.send_message("❌ Invalid format", ephemeral=True)
+    if not ms: 
+        return await interaction.followup.send("❌ Invalid format. Use: 30m, 1h, 7d", ephemeral=True)
+    
     key = gen_key()
     db.execute("INSERT INTO keys VALUES (?,?,?,?,?,NULL,0)", (key, str(interaction.user.id), now_ms(), now_ms() + ms, None))
     db.commit()
+    
     embed = discord.Embed(title="🔑 Key Generated", color=0x57F287)
     embed.add_field(name="Key", value=f"```{key}```")
     embed.add_field(name="Expires", value=f"<t:{(now_ms() + ms)//1000}:R>")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="redeemkey", description="✅ Redeem access key")
 @app_commands.describe(key="Your access key")
 async def redeemkey(interaction: discord.Interaction, key: str):
+    # Defer immediately
+    await interaction.response.defer(ephemeral=True)
+    
     row = db.execute("SELECT * FROM keys WHERE key = ?", (key,)).fetchone()
-    if not row: return await interaction.response.send_message("❌ Invalid key", ephemeral=True)
-    if row["revoked"]: return await interaction.response.send_message("❌ Revoked", ephemeral=True)
-    if row["expires_at"] <= now_ms(): return await interaction.response.send_message("❌ Expired", ephemeral=True)
-    if row["redeemed_by"]: return await interaction.response.send_message("❌ Already used", ephemeral=True)
+    if not row: 
+        return await interaction.followup.send("❌ Invalid key", ephemeral=True)
+    if row["revoked"]: 
+        return await interaction.followup.send("❌ Revoked", ephemeral=True)
+    if row["expires_at"] <= now_ms(): 
+        return await interaction.followup.send("❌ Expired", ephemeral=True)
+    if row["redeemed_by"]: 
+        return await interaction.followup.send("❌ Already used", ephemeral=True)
     
     uid = str(interaction.user.id)
     db.execute("UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE key = ?", (uid, now_ms(), key))
     db.execute("INSERT OR REPLACE INTO authorized_users VALUES (?,?,?,?)", (uid, key, now_ms(), row["expires_at"]))
     db.commit()
-    await interaction.response.send_message("✅ Access granted! Use `/panel` to open control center", ephemeral=True)
+    
+    await interaction.followup.send("✅ Access granted! Use `/panel` to open control center", ephemeral=True)
 
 @bot.tree.command(name="loginselfbot", description="🔑 Login your selfbot alt account")
 async def loginselfbot(interaction: discord.Interaction):
@@ -404,7 +425,7 @@ async def selfbotstatus(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ─── API Server for SelfBot Communication ───
+# ─── API Server ───
 from aiohttp import web
 
 async def api_handler(request):
@@ -424,31 +445,27 @@ async def api_handler(request):
     
     return web.json_response({'error': 'not found'}, status=404)
 
-async def health_handler(request):
-    return web.Response(text='OK', status=200)
-
 async def start_api_server():
     app = web.Application()
     app.router.add_get('/settings/{user_id}', api_handler)
-    app.router.add_get('/health', health_handler)
+    app.router.add_get('/health', lambda r: web.Response(text='OK'))
     
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, 'localhost', 8080)
     await site.start()
-    print("✅ API server running on localhost:8080")
+    print("✅ API server on localhost:8080")
 
 # ═══════════════════════════════════════════════════════
-# CLIENT LOGIN / BOT RUN - THE ACTUAL LOGIN CALL
+# MAIN - BOT LOGIN HERE
 # ═══════════════════════════════════════════════════════
 async def main():
-    # Start API server first
+    # Start API server in background
     await start_api_server()
     
-    # ═══ CLIENT LOGIN HERE ═══
-    # This is where the bot actually logs in to Discord
+    # ═══ BOT LOGIN / RUN ═══
+    # This connects to Discord and starts the bot
     await bot.start(TOKEN)
-    # Alternative: bot.run(TOKEN) - but we use start() for async
 
 if __name__ == '__main__':
     asyncio.run(main())
