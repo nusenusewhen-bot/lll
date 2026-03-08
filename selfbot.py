@@ -1,24 +1,19 @@
-import discord
-from discord.ext import commands, tasks
-import aiohttp
 import asyncio
+import aiohttp
+import websockets
 import json
 import time
 import random
-import string
 import os
 import sys
 from datetime import datetime
 from typing import Optional, Dict, Any
 import logging
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger('SelfBot')
 
@@ -30,11 +25,10 @@ CONFIG = {
     'razorcap_url': 'https://api.razorcap.cc/solve',
     'proxies': [p.strip() for p in os.environ.get('PROXIES', '').split(',') if p.strip()],
     'bot_api_url': os.environ.get('BOT_API_URL', 'http://localhost:8080'),
-    'fingerprint_rotation': 300000,  # 5 minutes
     'claim_delay_min': 800,
     'claim_delay_max': 2500,
-    'captcha_timeout': 120,
-    'max_retries': 3
+    'api_version': '9',
+    'gateway_version': '9'
 }
 
 # ─── Proxy Rotator ───
@@ -43,78 +37,52 @@ class ProxyRotator:
         self.proxies = CONFIG['proxies']
         self.current = 0
         self.working = []
-        self.tested = False
         
     async def test_proxy(self, proxy: str) -> bool:
         try:
             timeout = aiohttp.ClientTimeout(total=10)
-            connector = aiohttp.TCPConnector(ssl=False)
-            
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(
                     'https://discord.com/api/v9/users/@me',
                     proxy=proxy,
                     headers={'Authorization': CONFIG['token']}
                 ) as resp:
                     return resp.status == 200
-        except Exception as e:
-            logger.debug(f"Proxy {proxy} failed: {e}")
+        except:
             return False
     
     async def get_working_proxy(self) -> Optional[str]:
         if not self.proxies:
             return None
-            
-        if not self.tested:
-            logger.info("Testing proxies...")
-            tasks = [self.test_proxy(p) for p in self.proxies]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for proxy, working in zip(self.proxies, results):
-                if working is True:
-                    self.working.append(proxy)
-            self.tested = True
-            logger.info(f"Found {len(self.working)} working proxies")
-        
+        if not self.working:
+            for p in self.proxies:
+                if await self.test_proxy(p):
+                    self.working.append(p)
         if not self.working:
             return None
-            
         proxy = self.working[self.current % len(self.working)]
         self.current += 1
         return proxy
 
-# ─── Fingerprint Evasion ───
+# ─── Fingerprint Generator ───
 class Fingerprint:
     def __init__(self):
-        self.browsers = [
-            'Chrome/120.0.0.0 Safari/537.36',
-            'Firefox/121.0',
-            'Edg/120.0.0.0'
-        ]
-        self.systems = [
-            'Windows NT 10.0; Win64; x64',
-            'Macintosh; Intel Mac OS X 10_15_7',
-            'X11; Linux x86_64'
-        ]
-        self.locales = ['en-US', 'en-GB', 'fr-FR', 'de-DE']
-        self.timezones = ['America/New_York', 'Europe/London', 'Asia/Tokyo', 'Australia/Sydney']
+        self.browsers = ['Chrome/120.0.0.0', 'Firefox/121.0', 'Safari/605.1.15']
+        self.systems = ['Windows NT 10.0; Win64; x64', 'Macintosh; Intel Mac OS X 10_15_7']
+        self.locales = ['en-US', 'en-GB', 'de-DE']
+        self.timezones = ['America/New_York', 'Europe/London', 'Asia/Tokyo']
         self.rotate()
         
     def rotate(self):
         self.ua = f"Mozilla/5.0 ({random.choice(self.systems)}) AppleWebKit/537.36 (KHTML, like Gecko) {random.choice(self.browsers)}"
         self.locale = random.choice(self.locales)
         self.timezone = random.choice(self.timezones)
-        self.screen = f"{random.randint(1920, 2560)}x{random.randint(1080, 1440)}"
-        self.color_depth = random.choice([24, 32])
-        self.memory = random.choice([4, 8, 16, 32])
-        self.cores = random.choice([4, 6, 8, 12, 16])
+        self.super_properties = self._encode_super_props()
         
-        # Generate Discord super properties
-        self.super_properties = self._generate_super_properties()
-        
-    def _generate_super_properties(self) -> str:
+    def _encode_super_props(self) -> str:
+        import base64
         props = {
-            "os": sys.platform,
+            "os": "Windows",
             "browser": "Chrome",
             "device": "",
             "system_locale": self.locale,
@@ -127,21 +95,19 @@ class Fingerprint:
             "referring_domain_current": "",
             "release_channel": "stable",
             "client_build_number": random.randint(240000, 250000),
-            "client_event_source": None,
-            "design_id": 0
+            "client_event_source": None
         }
-        import base64
         return base64.b64encode(json.dumps(props).encode()).decode()
     
-    def get_headers(self, auth_token: Optional[str] = None) -> Dict[str, str]:
-        headers = {
+    def get_headers(self) -> Dict[str, str]:
+        return {
             'User-Agent': self.ua,
             'Accept': '*/*',
             'Accept-Language': f'{self.locale},en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
             'Referer': 'https://discord.com/',
             'Origin': 'https://discord.com',
-            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120"',
             'Sec-Ch-Ua-Mobile': '?0',
             'Sec-Ch-Ua-Platform': '"Windows"',
             'Sec-Fetch-Dest': 'empty',
@@ -150,12 +116,8 @@ class Fingerprint:
             'X-Debug-Options': 'bugReporterEnabled',
             'X-Discord-Locale': self.locale,
             'X-Discord-Timezone': self.timezone,
-            'X-Super-Properties': self.super_properties,
-            'X-Track': 'eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEyMC4wLjAuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMTIwLjAuMC4wIiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiIiLCJyZWZlcnJpbmdfZG9tYWluIjoiIiwicmVmZXJyZXJfY3VycmVudCI6IiIsInJlZmVycmluZ19kb21haW5fY3VycmVudCI6IiIsInJlbGVhc2VfY2hhbm5lbCI6InN0YWJsZSIsImNsaWVudF9idWlsZF9udW1iZXIiOjI0NTY2NiwiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0='
+            'X-Super-Properties': self.super_properties
         }
-        if auth_token:
-            headers['Authorization'] = auth_token
-        return headers
 
 # ─── CAPTCHA Solver ───
 class CaptchaSolver:
@@ -164,17 +126,12 @@ class CaptchaSolver:
         self.fp = fingerprint
         self.session: Optional[aiohttp.ClientSession] = None
         
-    async def init_session(self):
-        if not self.session:
-            self.session = aiohttp.ClientSession()
+    async def init(self):
+        self.session = aiohttp.ClientSession()
     
     async def solve_razorcap(self, site_key: str, page_url: str, captcha_type: str = 'hcaptcha_enterprise', rqdata: Optional[str] = None) -> Optional[str]:
-        """Primary solver: RazorCap API"""
         try:
-            await self.init_session()
-            
             proxy = await self.proxy_rotator.get_working_proxy()
-            
             payload = {
                 'type': captcha_type,
                 'websiteURL': page_url,
@@ -182,7 +139,6 @@ class CaptchaSolver:
                 'rqdata': rqdata,
                 'proxy': proxy
             }
-            # Remove None values
             payload = {k: v for k, v in payload.items() if v is not None}
             
             headers = {
@@ -191,121 +147,66 @@ class CaptchaSolver:
                 'User-Agent': self.fp.ua
             }
             
-            logger.info(f'Sending CAPTCHA to RazorCap: {captcha_type}')
-            
-            async with self.session.post(
-                CONFIG['razorcap_url'],
-                json=payload,
-                headers=headers,
-                proxy=proxy,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
+            logger.info('Sending to RazorCap...')
+            async with self.session.post(CONFIG['razorcap_url'], json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 data = await resp.json()
-                
                 if data.get('error'):
-                    logger.error(f"RazorCap API error: {data['error']}")
                     return None
-                    
-                task_id = data.get('taskId')
-                if not task_id:
-                    logger.error("No taskId in RazorCap response")
-                    return None
-                    
-                return await self._poll_razorcap(task_id, proxy)
-                
+                return await self._poll_razorcap(data.get('taskId'), proxy)
         except Exception as e:
-            logger.error(f'RazorCap failed: {e}')
+            logger.error(f'RazorCap error: {e}')
             return None
     
     async def _poll_razorcap(self, task_id: str, proxy: Optional[str], max_attempts: int = 60) -> Optional[str]:
-        """Poll for RazorCap result"""
-        for i in range(max_attempts):
+        for _ in range(max_attempts):
+            await asyncio.sleep(2)
             try:
-                await asyncio.sleep(2)
-                
-                headers = {
-                    'Authorization': f'Bearer {CONFIG["razorcap_key"]}',
-                    'User-Agent': self.fp.ua
-                }
-                
-                async with self.session.get(
-                    f'{CONFIG["razorcap_url"]}/result/{task_id}',
-                    headers=headers,
-                    proxy=proxy,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
+                headers = {'Authorization': f'Bearer {CONFIG["razorcap_key"]}'}
+                async with self.session.get(f'{CONFIG["razorcap_url"]}/result/{task_id}', headers=headers) as resp:
                     data = await resp.json()
-                    
                     if data.get('status') == 'ready':
-                        token = data.get('solution', {}).get('token') or data.get('solution')
-                        if token:
-                            logger.info('RazorCap solved successfully')
-                            return token
-                            
-            except Exception as e:
-                logger.debug(f'Poll error: {e}')
-                
-        logger.error('RazorCap polling timeout')
+                        return data.get('solution', {}).get('token') or data.get('solution')
+            except:
+                pass
         return None
     
     async def solve_2captcha(self, site_key: str, page_url: str) -> Optional[str]:
-        """Backup #1: 2Captcha (if API key provided)"""
         api_key = os.environ.get('2CAPTCHA_API_KEY')
         if not api_key:
             return None
-            
         try:
-            # Submit CAPTCHA
-            submit_url = 'http://2captcha.com/in.php'
-            params = {
-                'key': api_key,
-                'method': 'hcaptcha',
-                'sitekey': site_key,
-                'pageurl': page_url,
-                'json': 1
-            }
-            
-            async with self.session.get(submit_url, params=params) as resp:
+            async with self.session.get('http://2captcha.com/in.php', params={
+                'key': api_key, 'method': 'hcaptcha', 'sitekey': site_key, 'pageurl': page_url, 'json': 1
+            }) as resp:
                 data = await resp.json()
                 if data.get('status') != 1:
                     return None
                 captcha_id = data.get('request')
             
-            # Poll for result
-            result_url = 'http://2captcha.com/res.php'
             for _ in range(30):
                 await asyncio.sleep(5)
-                params = {
-                    'key': api_key,
-                    'action': 'get',
-                    'id': captcha_id,
-                    'json': 1
-                }
-                async with self.session.get(result_url, params=params) as resp:
+                async with self.session.get('http://2captcha.com/res.php', params={
+                    'key': api_key, 'action': 'get', 'id': captcha_id, 'json': 1
+                }) as resp:
                     data = await resp.json()
                     if data.get('status') == 1:
                         return data.get('request')
-                        
         except Exception as e:
-            logger.error(f'2Captcha failed: {e}')
+            logger.error(f'2Captcha error: {e}')
         return None
     
     async def solve_browser(self, site_key: str, page_url: str) -> Optional[str]:
-        """Backup #2: Browser automation using Playwright/Selenium"""
-        # This requires playwright: pip install playwright
-        # And: playwright install chromium
-        
+        """Free backup using Playwright browser automation"""
         try:
             from playwright.async_api import async_playwright
-            
             proxy = await self.proxy_rotator.get_working_proxy()
             
             async with async_playwright() as p:
-                browser_args = ['--no-sandbox', '--disable-setuid-sandbox']
+                args = ['--no-sandbox', '--disable-setuid-sandbox']
                 if proxy:
-                    browser_args.append(f'--proxy-server={proxy}')
+                    args.append(f'--proxy-server={proxy}')
                 
-                browser = await p.chromium.launch(headless=True, args=browser_args)
+                browser = await p.chromium.launch(headless=True, args=args)
                 context = await browser.new_context(
                     user_agent=self.fp.ua,
                     viewport={'width': 1920, 'height': 1080},
@@ -314,98 +215,64 @@ class CaptchaSolver:
                 )
                 
                 page = await context.new_page()
-                
-                # Inject fingerprint evasion scripts
                 await page.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                    Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
                     window.chrome = { runtime: {} };
                 """)
                 
                 await page.goto(page_url, wait_until='networkidle')
                 
-                # Wait for hCaptcha iframe
                 try:
                     await page.wait_for_selector('iframe[src*="hcaptcha"]', timeout=10000)
-                    
-                    # Try to click checkbox
                     frames = page.frames
-                    hcaptcha_frame = None
-                    for frame in frames:
-                        if 'hcaptcha' in frame.url:
-                            hcaptcha_frame = frame
-                            break
-                    
+                    hcaptcha_frame = next((f for f in frames if 'hcaptcha' in f.url), None)
                     if hcaptcha_frame:
                         await hcaptcha_frame.click('#checkbox', timeout=5000)
                         await asyncio.sleep(5)
                     
-                    # Extract token
-                    token = await page.evaluate('''() => {
-                        const el = document.querySelector('textarea[name="h-captcha-response"]');
-                        return el ? el.value : null;
-                    }''')
-                    
+                    token = await page.evaluate('''() => document.querySelector('textarea[name="h-captcha-response"]')?.value''')
                     await browser.close()
-                    
                     if token:
-                        logger.info('Browser automation solved CAPTCHA')
+                        logger.info('Browser solve success')
                         return token
-                        
-                except Exception as e:
-                    logger.debug(f'Browser solve error: {e}')
-                    
+                except:
+                    pass
                 await browser.close()
-                
         except ImportError:
-            logger.debug('Playwright not installed, skipping browser backup')
+            logger.debug('Playwright not installed')
         except Exception as e:
-            logger.error(f'Browser backup failed: {e}')
-            
+            logger.error(f'Browser error: {e}')
         return None
     
     async def solve(self, site_key: str, page_url: str, captcha_type: str = 'hcaptcha_enterprise', rqdata: Optional[str] = None) -> str:
-        """
-        Master solve method - tries all solvers in order:
-        1. RazorCap (primary)
-        2. 2Captcha (backup #1)
-        3. Browser automation (backup #2 - free)
-        """
-        await self.init_session()
+        await self.init()
         
-        # Try RazorCap first
-        logger.info('Attempting RazorCap...')
         result = await self.solve_razorcap(site_key, page_url, captcha_type, rqdata)
         if result:
             return result
             
-        # Try 2Captcha
-        logger.info('Attempting 2Captcha backup...')
         result = await self.solve_2captcha(site_key, page_url)
         if result:
             return result
             
-        # Try browser automation (free)
-        logger.info('Attempting browser automation backup...')
         result = await self.solve_browser(site_key, page_url)
         if result:
             return result
             
-        raise Exception('All CAPTCHA solvers failed')
+        raise Exception('All solvers failed')
 
-# ─── SelfBot Client ───
-class SelfBot(commands.Bot):
+# ─── Discord SelfBot Client ───
+class DiscordSelfBot:
     def __init__(self):
-        # Use discord.py-selfbot (install: pip install discord.py-selfbot)
-        super().__init__(
-            command_prefix='!',
-            self_bot=True,
-            help_command=None
-        )
-        
+        self.token = CONFIG['token']
         self.proxy_rotator = ProxyRotator()
-        self.fingerprint = Fingerprint()
-        self.captcha_solver = CaptchaSolver(self.proxy_rotator, self.fingerprint)
+        self.fp = Fingerprint()
+        self.captcha = CaptchaSolver(self.proxy_rotator, self.fp)
+        self.ws = None
+        self.session_id = None
+        self.heartbeat_interval = None
+        self.gateway_url = 'wss://gateway.discord.gg/?v=9&encoding=json'
         self.settings = {
             'status': 'stopped',
             'category_id': None,
@@ -413,171 +280,233 @@ class SelfBot(commands.Bot):
             'transfer_cmd': None,
             'transfer_id': None
         }
-        self.claimed_tickets = set()
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.claimed = set()
+        self.guilds = {}
+        self.channels = {}
+        self.http_session: Optional[aiohttp.ClientSession] = None
         
-        # Rotate fingerprint every 5 minutes
-        self.fp_rotation.start()
+    async def start(self):
+        if not self.token:
+            logger.error('SELFBOT_TOKEN not set!')
+            return
+            
+        await self.captcha.init()
+        self.http_session = aiohttp.ClientSession(headers={
+            'Authorization': self.token,
+            **self.fp.get_headers()
+        })
         
-    async def setup_hook(self):
-        self.session = aiohttp.ClientSession()
-        await self.proxy_rotator.get_working_proxy()  # Test proxies on startup
+        # Test token
+        me = await self.api_request('GET', '/users/@me')
+        if not me:
+            logger.error('Invalid token or account banned')
+            return
+            
+        logger.info(f'Starting selfbot as {me.get("username")}#{me.get("discriminator")}')
         
-    @tasks.loop(seconds=300)
-    async def fp_rotation(self):
-        self.fingerprint.rotate()
-        logger.info('Rotated browser fingerprint')
+        # Start gateway connection
+        await self.connect_gateway()
         
-    async def on_ready(self):
-        logger.info(f'SelfBot logged in as {self.user} (ID: {self.user.id})')
-        logger.info(f'Fingerprint: {self.fingerprint.ua[:50]}...')
-        
-        # Start polling for settings
-        self.settings_poller.start()
-        
-        # Anti-detection: random status changes
-        self.status_changer.start()
-        
-    @tasks.loop(seconds=10)
-    async def settings_poller(self):
-        """Poll main bot for settings updates"""
+    async def api_request(self, method: str, endpoint: str, json_data: dict = None) -> Optional[dict]:
         try:
-            async with self.session.get(
-                f'{CONFIG["bot_api_url"]}/settings/{self.user.id}',
-                headers=self.fingerprint.get_headers(),
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    self.settings.update(data)
+            url = f'https://discord.com/api/v9{endpoint}'
+            async with self.http_session.request(method, url, json=json_data) as resp:
+                if resp.status == 204:
+                    return {}
+                if resp.status == 429:
+                    retry = int(resp.headers.get('Retry-After', 1))
+                    logger.warning(f'Rate limited, waiting {retry}s')
+                    await asyncio.sleep(retry)
+                    return await self.api_request(method, endpoint, json_data)
+                if resp.status >= 400:
+                    text = await resp.text()
+                    logger.error(f'API error {resp.status}: {text}')
+                    return None
+                return await resp.json()
         except Exception as e:
-            pass  # Bot API might be down
-            
-    @tasks.loop(minutes=5)
-    async def status_changer(self):
-        """Random status to avoid detection"""
-        statuses = [discord.Status.online, discord.Status.idle, discord.Status.dnd]
-        activities = [
-            discord.Activity(type=discord.ActivityType.playing, name="Games"),
-            discord.Activity(type=discord.ActivityType.listening, name="Spotify"),
-            discord.Activity(type=discord.ActivityType.watching, name="YouTube")
-        ]
-        await self.change_presence(
-            status=random.choice(statuses),
-            activity=random.choice(activities)
-        )
+            logger.error(f'Request error: {e}')
+            return None
+    
+    async def send_message(self, channel_id: str, content: str) -> bool:
+        result = await self.api_request('POST', f'/channels/{channel_id}/messages', {
+            'content': content,
+            'nonce': str(random.randint(1000000000000000000, 9999999999999999999)),
+            'tts': False
+        })
+        return result is not None
+    
+    async def connect_gateway(self):
+        """Connect to Discord Gateway WebSocket"""
+        while True:
+            try:
+                proxy = await self.proxy_rotator.get_working_proxy()
+                connector = None
+                if proxy:
+                    from aiohttp_socks import ProxyConnector
+                    connector = ProxyConnector.from_url(proxy)
+                
+                async with websockets.connect(self.gateway_url, ping_interval=None, ping_timeout=None) as ws:
+                    self.ws = ws
+                    logger.info('Gateway connected')
+                    
+                    # Identify
+                    await self.identify()
+                    
+                    # Message handler
+                    async for message in ws:
+                        await self.handle_gateway_msg(json.loads(message))
+                        
+            except Exception as e:
+                logger.error(f'Gateway error: {e}')
+                await asyncio.sleep(5)
+    
+    async def identify(self):
+        """Send identify payload"""
+        payload = {
+            'op': 2,
+            'd': {
+                'token': self.token,
+                'properties': {
+                    'os': 'Windows',
+                    'browser': 'Chrome',
+                    'device': '',
+                    'system_locale': self.fp.locale,
+                    'browser_user_agent': self.fp.ua,
+                    'browser_version': '120.0.0.0',
+                    'os_version': '10',
+                    'referrer': '',
+                    'referring_domain': '',
+                    'referrer_current': '',
+                    'referring_domain_current': '',
+                    'release_channel': 'stable',
+                    'client_build_number': 245666,
+                    'client_event_source': None
+                },
+                'presence': {
+                    'status': 'online',
+                    'since': 0,
+                    'activities': [],
+                    'afk': False
+                },
+                'compress': False,
+                'client_state': {
+                    'guild_versions': {},
+                    'highest_last_message_id': '0',
+                    'read_state_version': 0,
+                    'user_guild_settings_version': -1,
+                    'user_settings_version': -1,
+                    'private_channels_version': '0',
+                    'api_code_version': 0
+                }
+            }
+        }
+        await self.ws.send(json.dumps(payload))
+    
+    async def handle_gateway_msg(self, msg: dict):
+        op = msg.get('op')
+        d = msg.get('d', {})
         
-    async def on_message(self, message):
-        # Skip own messages
-        if message.author.id == self.user.id:
-            return
+        if op == 10:  # Hello
+            self.heartbeat_interval = d['heartbeat_interval']
+            asyncio.create_task(self.heartbeat_loop())
+            logger.info(f'Heartbeat interval: {self.heartbeat_interval}')
             
-        await self.process_commands(message)
-        
-        # Check if this is a new ticket in target category
-        if not isinstance(message.channel, discord.TextChannel):
-            return
+        elif op == 0:  # Dispatch
+            t = msg.get('t')
             
-        await self.check_ticket(message.channel)
-        
-    async def check_ticket(self, channel: discord.TextChannel):
-        """Check if channel is a ticket to claim"""
+            if t == 'READY':
+                self.session_id = d.get('session_id')
+                logger.info(f'Session ready: {self.session_id}')
+                # Update guilds/channels cache
+                for guild in d.get('guilds', []):
+                    self.guilds[guild['id']] = guild
+                    
+            elif t == 'GUILD_CREATE':
+                self.guilds[d['id']] = d
+                
+            elif t == 'CHANNEL_CREATE':
+                await self.handle_channel_create(d)
+                
+            elif t == 'MESSAGE_CREATE':
+                # Could handle claim confirmations here
+                pass
+    
+    async def heartbeat_loop(self):
+        """Send heartbeat every interval"""
+        while True:
+            await asyncio.sleep(self.heartbeat_interval / 1000)
+            try:
+                await self.ws.send(json.dumps({'op': 1, 'd': self.session_id}))
+            except:
+                break
+    
+    async def handle_channel_create(self, channel: dict):
+        """Handle new channel (ticket) creation"""
         if self.settings['status'] != 'running':
             return
         if not self.settings['category_id']:
             return
-        if str(channel.category_id) != str(self.settings['category_id']):
+        if channel.get('parent_id') != self.settings['category_id']:
             return
-        if channel.id in self.claimed_tickets:
+        if channel['id'] in self.claimed:
             return
             
-        logger.info(f'New ticket detected: {channel.name} ({channel.id})')
+        logger.info(f'New ticket: {channel.get("name")} ({channel["id"]})')
         
-        # Random delay to seem human
+        # Random delay
         delay = random.randint(CONFIG['claim_delay_min'], CONFIG['claim_delay_max'])
-        logger.info(f'Waiting {delay}ms before claiming...')
+        logger.info(f'Waiting {delay}ms...')
         await asyncio.sleep(delay / 1000)
         
-        try:
-            # Send typing indicator
-            async with channel.typing():
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-            
-            # Send claim command
-            claim_msg = await channel.send(self.settings['claim_cmd'])
-            self.claimed_tickets.add(channel.id)
-            logger.info(f'Claimed ticket {channel.id}')
+        # Send claim command
+        if await self.send_message(channel['id'], self.settings['claim_cmd']):
+            self.claimed.add(channel['id'])
+            logger.info(f'Claimed: {channel["id"]}')
             
             # Transfer if configured
             if self.settings['transfer_cmd'] and self.settings['transfer_id']:
                 await asyncio.sleep(random.uniform(1, 2))
-                transfer_msg = f"{self.settings['transfer_cmd']} {self.settings['transfer_id']}"
-                await channel.send(transfer_msg)
-                logger.info(f'Transferred ticket to {self.settings["transfer_id"]}')
-                
-        except discord.Forbidden:
-            logger.error(f'Forbidden to send in {channel.id}')
-        except discord.HTTPException as e:
-            if 'captcha' in str(e).lower():
-                logger.warning('CAPTCHA detected during message send')
-                # Note: Handling CAPTCHA on message send requires solving and retrying
-                # This is simplified - full implementation would catch the captcha sitekey
-            else:
-                logger.error(f'HTTP error: {e}')
-                
-    async def on_guild_channel_create(self, channel):
-        """Alternative: Catch channel creation event directly"""
-        if isinstance(channel, discord.TextChannel):
-            await self.check_ticket(channel)
-            
-    async def handle_login_captcha(self, error_data: dict) -> bool:
-        """Handle CAPTCHA challenge during login"""
-        try:
-            logger.info('Login CAPTCHA detected, solving...')
-            
-            # Extract CAPTCHA data from error
-            site_key = error_data.get('captcha_sitekey', 'f5561ba9-8f1e-40ca-9b5b-a0b3f719ef34')
-            rqdata = error_data.get('captcha_rqdata')
-            
-            solution = await self.captcha_solver.solve(
-                site_key=site_key,
-                page_url='https://discord.com/login',
-                captcha_type='hcaptcha_enterprise',
-                rqdata=rqdata
-            )
-            
-            if solution:
-                logger.info('CAPTCHA solved, retrying login...')
-                # Note: Actually using the solution requires modifying the login payload
-                # This would need to be integrated with the discord.py login flow
-                return True
-                
-        except Exception as e:
-            logger.error(f'CAPTCHA handling failed: {e}')
-            
-        return False
-        
-    async def close(self):
-        if self.session:
-            await self.session.close()
-        await super().close()
+                transfer_msg = f'{self.settings["transfer_cmd"]} {self.settings["transfer_id"]}'
+                if await self.send_message(channel['id'], transfer_msg):
+                    logger.info(f'Transferred to: {self.settings["transfer_id"]}')
+        else:
+            logger.error(f'Failed to claim: {channel["id"]}')
+    
+    async def poll_settings(self):
+        """Poll main bot for settings"""
+        while True:
+            try:
+                async with self.http_session.get(f'{CONFIG["bot_api_url"]}/settings/{self.token.split(".")[0]}') as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        self.settings.update(data)
+                        logger.debug(f'Settings updated: {self.settings}')
+            except:
+                pass
+            await asyncio.sleep(2)
+    
+    async def rotate_fingerprint(self):
+        """Rotate fingerprint periodically"""
+        while True:
+            await asyncio.sleep(300)  # 5 minutes
+            self.fp.rotate()
+            self.http_session.headers.update(self.fp.get_headers())
+            logger.info('Fingerprint rotated')
 
-# ─── Run ───
 def main():
-    if not CONFIG['token']:
-        logger.error('SELFBOT_TOKEN not set!')
-        return
-        
-    bot = SelfBot()
+    bot = DiscordSelfBot()
+    
+    async def run():
+        await asyncio.gather(
+            bot.start(),
+            bot.poll_settings(),
+            bot.rotate_fingerprint()
+        )
     
     try:
-        bot.run(CONFIG['token'], reconnect=True)
-    except discord.LoginFailure as e:
-        if 'captcha' in str(e).lower():
-            logger.error('Login blocked by CAPTCHA - manual solve required or use pre-solved token')
-            # In a full implementation, you'd catch the captcha data here and solve it
-        else:
-            raise
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        logger.info('Shutting down...')
 
 if __name__ == '__main__':
     main()
