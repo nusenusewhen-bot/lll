@@ -13,11 +13,21 @@ import threading
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-# ─── Config ───
-TOKEN = os.environ["DISCORD_TOKEN"]
+# ═══════════════════════════════════════════════════════
+# CONFIGURATION - GET FROM ENVIRONMENT
+# ═══════════════════════════════════════════════════════
+TOKEN = os.environ.get("DISCORD_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "1479770170389172285"))
 
-# ─── Database ───
+if not TOKEN:
+    print("❌ ERROR: DISCORD_TOKEN not set in environment!")
+    exit(1)
+
+print(f"🔑 Token loaded: {TOKEN[:20]}...")
+
+# ═══════════════════════════════════════════════════════
+# DATABASE SETUP
+# ═══════════════════════════════════════════════════════
 db = sqlite3.connect("bot.db", check_same_thread=False)
 db.row_factory = sqlite3.Row
 db.execute("PRAGMA journal_mode=WAL")
@@ -85,7 +95,9 @@ def upsert_panel(uid, **kwargs):
         db.execute("INSERT INTO panels VALUES (?,?,?,?,?,?,?)", (str(uid), kwargs.get("status", "stopped"), kwargs.get("ticket_category", "None"), kwargs.get("command", "None"), kwargs.get("transfer_command", "None"), kwargs.get("custom_id", "None"), now_ms())); db.commit()
     return get_panel(uid)
 
-# ─── SelfBot Manager ───
+# ═══════════════════════════════════════════════════════
+# SELFBOT MANAGER
+# ═══════════════════════════════════════════════════════
 class SelfBotManager:
     def __init__(self):
         self.cleanup_sessions()
@@ -176,7 +188,9 @@ class SelfBotManager:
 
 manager = SelfBotManager()
 
-# ─── UI ───
+# ═══════════════════════════════════════════════════════
+# UI COMPONENTS
+# ═══════════════════════════════════════════════════════
 def build_panel_embed(uid, data, selfbot_status=None):
     running = data["status"] == "running"
     color = 0x57F287 if running else 0xED4245
@@ -329,23 +343,29 @@ class EditModal(ui.Modal):
         self.view.refresh()
         await interaction.response.edit_message(embed=build_panel_embed(self.view.uid, data, sb_status), view=self.view)
 
-# ─── Bot Setup ───
-bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
+# ═══════════════════════════════════════════════════════
+# BOT SETUP - CREATE CLIENT
+# ═══════════════════════════════════════════════════════
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot online as {bot.user}")
-    # Sync commands in background
+    print(f"✅✅✅ BOT LOGGED IN AS: {bot.user} (ID: {bot.user.id}) ✅✅✅")
+    print(f"🔑 Token used: {TOKEN[:15]}...")
+    
+    # Sync commands
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} commands")
+        for cmd in synced:
+            print(f"  - /{cmd.name}")
     except Exception as e:
-        print(f"❌ Failed to sync commands: {e}")
+        print(f"❌ Failed to sync: {e}")
 
 @bot.tree.command(name="generatekey", description="🔑 Generate access key (Owner only)")
 @app_commands.describe(duration="Duration: 30m, 1h, 7d")
 async def generatekey(interaction: discord.Interaction, duration: str):
-    # Defer immediately to prevent timeout
     await interaction.response.defer(ephemeral=True)
     
     if interaction.user.id != OWNER_ID:
@@ -367,7 +387,6 @@ async def generatekey(interaction: discord.Interaction, duration: str):
 @bot.tree.command(name="redeemkey", description="✅ Redeem access key")
 @app_commands.describe(key="Your access key")
 async def redeemkey(interaction: discord.Interaction, key: str):
-    # Defer immediately
     await interaction.response.defer(ephemeral=True)
     
     row = db.execute("SELECT * FROM keys WHERE key = ?", (key,)).fetchone()
@@ -385,7 +404,7 @@ async def redeemkey(interaction: discord.Interaction, key: str):
     db.execute("INSERT OR REPLACE INTO authorized_users VALUES (?,?,?,?)", (uid, key, now_ms(), row["expires_at"]))
     db.commit()
     
-    await interaction.followup.send("✅ Access granted! Use `/panel` to open control center", ephemeral=True)
+    await interaction.followup.send("✅ Access granted! Use `/panel`", ephemeral=True)
 
 @bot.tree.command(name="loginselfbot", description="🔑 Login your selfbot alt account")
 async def loginselfbot(interaction: discord.Interaction):
@@ -425,7 +444,9 @@ async def selfbotstatus(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ─── API Server ───
+# ═══════════════════════════════════════════════════════
+# API SERVER FOR SELFBOT COMMUNICATION
+# ═══════════════════════════════════════════════════════
 from aiohttp import web
 
 async def api_handler(request):
@@ -457,15 +478,32 @@ async def start_api_server():
     print("✅ API server on localhost:8080")
 
 # ═══════════════════════════════════════════════════════
-# MAIN - BOT LOGIN HERE
+# MAIN - BOT LOGIN AND RUN
 # ═══════════════════════════════════════════════════════
-async def main():
-    # Start API server in background
-    await start_api_server()
+def main():
+    # Start API server in background thread
+    loop = asyncio.new_event_loop()
     
-    # ═══ BOT LOGIN / RUN ═══
-    # This connects to Discord and starts the bot
-    bot.run(TOKEN)
+    def run_api():
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(start_api_server())
+        loop.run_forever()
+    
+    api_thread = threading.Thread(target=run_api, daemon=True)
+    api_thread.start()
+    print("✅ API server started in background")
+    
+    # ═══ BOT LOGIN HERE ═══
+    # client.run(TOKEN) blocks and runs the bot until disconnected
+    print(f"🔌 Connecting to Discord with token: {TOKEN[:15]}...")
+    
+    try:
+        bot.run(TOKEN)  # <-- THIS IS THE LOGIN CALL
+    except discord.LoginFailure as e:
+        print(f"❌ Login failed: {e}")
+        print("Check your DISCORD_TOKEN")
+    except Exception as e:
+        print(f"❌ Error: {e}")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
