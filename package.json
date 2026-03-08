@@ -3,10 +3,12 @@
   "version": "1.0.0",
   "scripts": {
     "start": "python bot.py",
-    "install": "pip install -r requirements.txt"
+    "selfbot": "node selfbot.js"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "dependencies": {}
+  "dependencies": {
+    "discord.js-selfbot-v13": "^2.14.9",
+    "axios": "^1.6.0",
+    "https-proxy-agent": "^7.0.2",
+    "better-sqlite3": "^9.4.3"
+  }
 }
