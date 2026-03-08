@@ -13,7 +13,7 @@ from socketserver import ThreadingMixIn
 from playwright.async_api import async_playwright
 from datetime import datetime
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+WEBHOOK_URL = "https://discord.com/api/webhooks/1479843046223909040/kGSLiyRPqh9TqsZfhRqMqc0fHdF05ZasD7DQNMHGT4Y7Su3yrCTU7N1Y_QhdZwgie614"
 
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
