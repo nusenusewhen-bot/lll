@@ -1,5 +1,5 @@
 const http = require('http');
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 const sqlite3 = require('better-sqlite3');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
@@ -15,14 +15,19 @@ if (!TOKEN) {
 }
 
 // ═══════════════════════════════════════════════════════
-// IMMEDIATE HEALTHCHECK SERVER
+// START HEALTHCHECK SERVER IMMEDIATELY (BEFORE ANYTHING)
 // ═══════════════════════════════════════════════════════
 const healthServer = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('OK');
+    if (req.url === '/health' || req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        return res.end('OK');
+    }
+    res.writeHead(404);
+    res.end('Not Found');
 });
+
 healthServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Health server on port ${PORT}`);
+    console.log(`✅ Health server running on port ${PORT}`);
 });
 
 // ═══════════════════════════════════════════════════════
@@ -70,8 +75,8 @@ class SelfBotManager {
     
     start(userId, token) {
         this.cleanup();
-        const env = { ...process.env, SELFBOT_TOKEN: token, OWNER_ID: String(userId), BOT_API_URL: 'http://localhost:3001' };
-        const proc = spawn('node', ['selfbot.js'], { env, detached: true });
+        const env = { ...process.env, SELFBOT_TOKEN: token, OWNER_ID: String(userId), BOT_API_URL: `http://localhost:${PORT}` };
+        const proc = spawn('node', ['selfbot.js'], { env, detached: true, stdio: 'ignore' });
         db.prepare('INSERT OR REPLACE INTO selfbot_sessions (user_id, token, process_id, status, started_at, last_ping) VALUES (?, ?, ?, ?, ?, ?)')
             .run(userId, token, proc.pid, 'starting', nowMs(), nowMs());
         proc.unref();
@@ -301,31 +306,7 @@ function showPanel(interaction, data, sb, edit = false) {
 }
 
 // ═══════════════════════════════════════════════════════
-// API SERVER FOR SELFBOT
-// ═══════════════════════════════════════════════════════
-const apiServer = http.createServer((req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    const match = req.url.match(/\/settings\/(.+)/);
-    if (match) {
-        const panel = getPanel(match[1]);
-        if (panel) {
-            res.writeHead(200);
-            return res.end(JSON.stringify({
-                status: panel.status,
-                ticket_category: panel.ticket_category,
-                command: panel.command,
-                transfer_command: panel.transfer_command,
-                custom_id: panel.custom_id
-            }));
-        }
-    }
-    res.writeHead(404);
-    res.end(JSON.stringify({ error: 'not found' }));
-});
-apiServer.listen(3001, () => console.log('✅ API server on localhost:3001'));
-
-// ═══════════════════════════════════════════════════════
-// LOGIN
+// LOGIN - START DISCORD BOT (BLOCKS FOREVER)
 // ═══════════════════════════════════════════════════════
 console.log('🔌 Connecting to Discord...');
 client.login(TOKEN).catch(e => {
