@@ -7,15 +7,11 @@ import re
 import os
 import time
 import asyncio
-import websockets
-import json
 from datetime import datetime
-from aiohttp import web
 
 # ─── Config ───
 TOKEN = os.environ["DISCORD_TOKEN"]
 OWNER_ID = int(os.environ.get("OWNER_ID", "1479770170389172285"))
-SELFBOT_TOKEN = os.environ.get("SELFBOT_TOKEN")  # The alt account token
 
 # ─── Database ───
 db = sqlite3.connect("bot.db", check_same_thread=False)
@@ -55,57 +51,6 @@ def upsert_panel(uid, **kwargs):
         db.execute("INSERT INTO panels VALUES (?,?,?,?,?,?,?)", (str(uid), kwargs.get("status", "stopped"), kwargs.get("ticket_category", "None"), kwargs.get("command", "None"), kwargs.get("transfer_command", "None"), kwargs.get("custom_id", "None"), now_ms())); db.commit()
     return get_panel(uid)
 
-# ─── SelfBot Controller ───
-class SelfBotController:
-    def __init__(self):
-        self.ws = None
-        self.connected = False
-        self.settings = {}
-        self.client = None
-        
-    async def start(self):
-        import aiohttp
-        self.session = aiohttp.ClientSession()
-        asyncio.create_task(self.claimer_loop())
-        
-    async def claimer_loop(self):
-        """Simulated selfbot - monitors channels via Discord API polling"""
-        headers = {"Authorization": SELFBOT_TOKEN, "Content-Type": "application/json"}
-        claimed = set()
-        
-        while True:
-            if self.settings.get("status") != "running" or not self.settings.get("category_id"):
-                await asyncio.sleep(2)
-                continue
-                
-            try:
-                # Get guild channels (simplified - you'd track specific guild)
-                async with self.session.get("https://discord.com/api/v9/users/@me/guilds", headers=headers) as resp:
-                    if resp.status != 200:
-                        await asyncio.sleep(5)
-                        continue
-                        
-                # Check for new channels in category (this is a simplified version)
-                # In production, you'd use gateway or track channel creates
-                await asyncio.sleep(1)
-                
-            except Exception as e:
-                print(f"Claimer error: {e}")
-                await asyncio.sleep(5)
-
-    def update_settings(self, uid, data):
-        self.settings = {
-            "user_id": str(uid),
-            "status": data.get("status", "stopped"),
-            "category_id": data.get("ticket_category"),
-            "claim_cmd": data.get("command", "claim"),
-            "transfer_cmd": data.get("transfer_command"),
-            "transfer_id": data.get("custom_id")
-        }
-        print(f"Settings updated: {self.settings}")
-
-claimer = SelfBotController()
-
 # ─── UI ───
 def build_embed(uid, data):
     running = data["status"] == "running"
@@ -142,14 +87,12 @@ class PanelView(ui.View):
     async def start_cb(self, interaction: discord.Interaction):
         if interaction.user.id != self.uid: return await interaction.response.send_message("❌ Not your panel", ephemeral=True)
         data = upsert_panel(self.uid, status="running")
-        claimer.update_settings(self.uid, data)
         self.refresh()
         await interaction.response.edit_message(embed=build_embed(self.uid, data), view=self)
         
     async def stop_cb(self, interaction: discord.Interaction):
         if interaction.user.id != self.uid: return await interaction.response.send_message("❌ Not your panel", ephemeral=True)
         data = upsert_panel(self.uid, status="stopped")
-        claimer.update_settings(self.uid, data)
         self.refresh()
         await interaction.response.edit_message(embed=build_embed(self.uid, data), view=self)
         
@@ -170,17 +113,15 @@ class EditModal(ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         kwargs = {self.key: self.input.value}
         data = upsert_panel(self.view.uid, **kwargs)
-        claimer.update_settings(self.view.uid, data)
         self.view.refresh()
         await interaction.response.edit_message(embed=build_embed(self.view.uid, data), view=self.view)
 
-# ─── Bot Setup ───
+# ─── Bot ───
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    await claimer.start()
     print(f"✅ Bot online as {bot.user}")
 
 @bot.tree.command(name="generatekey", description="🔑 Generate key (Owner only)")
