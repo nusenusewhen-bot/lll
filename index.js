@@ -3,7 +3,7 @@ const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, Bu
 const axios = require('axios');
 const bip39 = require('bip39');
 const hdkey = require('hdkey');
-const bitcoinjs = require('bitcoinjs-lib');
+const bitcoin = require('bitcoinjs-lib');
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers],
@@ -36,11 +36,20 @@ const PRODUCTS = {
 let walletAddress = null;
 let db = { tickets: new Map(), mmTickets: new Map(), settings: new Map() };
 
+const litecoinNetwork = {
+  messagePrefix: '\x19Litecoin Signed Message:\n',
+  bech32: 'ltc',
+  bip32: { public: 0x019da462, private: 0x019d9cfe },
+  pubKeyHash: 0x30,
+  scriptHash: 0x32,
+  wif: 0xb0
+};
+
 function getLTCAddress(mnemonic, index) {
   const seed = bip39.mnemonicToSeedSync(mnemonic);
   const root = hdkey.fromMasterSeed(seed);
   const child = root.derive("m/84'/2'/0'/0/" + index);
-  return bitcoinjs.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network: bitcoinjs.networks.litecoin }).address;
+  return bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network: litecoinNetwork }).address;
 }
 
 async function getLTCPrice() {
