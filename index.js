@@ -61,7 +61,7 @@ function getPrivateKey(mnemonic, index) {
 
 async function getLTCPrice() {
   try { 
-    const res = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd', { timeout: 5000 });
+    const res = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd', { timeout: 3000 });
     return res.data.litecoin.usd; 
   } catch { 
     return 85; 
@@ -71,7 +71,7 @@ async function getLTCPrice() {
 async function getUTXOs(address) {
   try {
     const url = LITECOIN_SPACE_API + '/address/' + address + '/utxo';
-    const res = await axios.get(url, { timeout: 10000 });
+    const res = await axios.get(url, { timeout: 5000 });
     return res.data || [];
   } catch {
     return [];
@@ -80,10 +80,9 @@ async function getUTXOs(address) {
 
 async function broadcastTX(txHex) {
   try {
-    const url = 'https://litecoinspace.org/api/tx';
-    const res = await axios.post(url, txHex, { 
+    const res = await axios.post('https://litecoinspace.org/api/tx', txHex, { 
       headers: { 'Content-Type': 'text/plain' },
-      timeout: 15000 
+      timeout: 10000 
     });
     return { success: true, txid: res.data };
   } catch (err) {
@@ -101,33 +100,115 @@ client.once('ready', async () => {
   }
   walletAddress = getLTCAddress(process.env.WALLET_MNEMONIC, WALLET_INDEX);
   console.log('LTC Address (Index ' + WALLET_INDEX + '): ' + walletAddress);
-  setInterval(checkPayments, 5000);
+  setInterval(checkPayments, 3000);
 });
+
+async function autoSplitAndNotify(amountLTC, receiveChannel) {
+  const utxos = await getUTXOs(walletAddress);
+  if (!utxos.length) {
+    if (receiveChannel) await receiveChannel.send('Payment received but no UTXOs found for split');
+    return;
+  }
+  
+  const totalBalance = utxos.reduce((sum, u) => sum + u.value, 0);
+  const fee = 10000;
+  const amountPerAddress = Math.floor((totalBalance - fee) / 3);
+  
+  if (amountPerAddress < 546) {
+    if (receiveChannel) await receiveChannel.send('Balance too small to split after fees');
+    return;
+  }
+  
+  try {
+    const psbt = new bitcoin.Psbt({ network: litecoinNetwork });
+    
+    for (const utxo of utxos) {
+      psbt.addInput({
+        hash: utxo.txid,
+        index: utxo.vout,
+        witnessUtxo: {
+          script: Buffer.from(utxo.scriptpubkey, 'hex'),
+          value: utxo.value
+        }
+      });
+    }
+    
+    for (const addr of SPLIT_ADDRESSES) {
+      psbt.addOutput({ address: addr, value: amountPerAddress });
+    }
+    
+    const privateKey = getPrivateKey(process.env.WALLET_MNEMONIC, WALLET_INDEX);
+    const keyPair = bitcoin.ECPair.fromPrivateKey(privateKey, { network: litecoinNetwork });
+    psbt.signAllInputs(keyPair);
+    psbt.finalizeAllInputs();
+    
+    const txHex = psbt.extractTransaction().toHex();
+    const result = await broadcastTX(txHex);
+    
+    if (result.success && receiveChannel) {
+      const embed = new EmbedBuilder()
+        .setTitle('Auto Split Executed')
+        .setDescription('Amount: ' + amountLTC + ' LTC\nTXID: `' + result.txid + '`')
+        .addFields(SPLIT_ADDRESSES.map((addr, i) => ({ 
+          name: 'Address ' + (i + 1), 
+          value: '`' + addr + '`\nSent: ' + (amountPerAddress / 100000000).toFixed(8) + ' LTC',
+          inline: true 
+        })))
+        .setColor(0x00FF00)
+        .setTimestamp();
+      await receiveChannel.send({ embeds: [embed] });
+    } else if (receiveChannel) {
+      await receiveChannel.send('Auto split failed: ' + result.error);
+    }
+  } catch (err) {
+    console.error('Auto split error:', err);
+    if (receiveChannel) await receiveChannel.send('Auto split error: ' + err.message);
+  }
+}
 
 async function checkPayments() {
   for (const [ticketId, ticket] of db.tickets) {
-    if (ticket.status !== 'awaiting_payment' && ticket.status !== 'confirming') continue;
+    if (ticket.status !== 'awaiting_payment') continue;
+    
     try {
-      const mempoolTxs = await checkMempool(walletAddress);
+      const url = LITECOIN_SPACE_API + '/address/' + walletAddress + '/txs/mempool';
+      const res = await axios.get(url, { timeout: 5000 });
+      const mempoolTxs = res.data || [];
+      
       for (const tx of mempoolTxs) {
         const vout = tx.vout?.find(v => v.scriptpubkey_address === walletAddress);
         if (!vout) continue;
+        
         const amountLTC = vout.value / 100000000;
-        const amountUSD = amountLTC * await getLTCPrice();
-        if (Math.abs(amountUSD - ticket.totalPrice) <= 0.10 && ticket.status === 'awaiting_payment') {
-          ticket.status = 'confirming';
+        const ltcPrice = await getLTCPrice();
+        const amountUSD = amountLTC * ltcPrice;
+        
+        if (Math.abs(amountUSD - ticket.totalPrice) <= 0.15) {
+          ticket.status = 'confirmed';
           ticket.txId = tx.txid;
           ticket.amountReceived = amountLTC;
+          
           const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
-          if (channel) await channel.send('Payment detected! Waiting for confirmation...');
+          const receiveChannelId = db.settings.get('receiveChannel');
+          const receiveChannel = receiveChannelId ? await client.channels.fetch(receiveChannelId).catch(() => null) : null;
+          
+          if (channel) {
+            await channel.send('✅ **Payment confirmed!** Auto-splitting now...');
+          }
+          
+          if (receiveChannel) {
+            await receiveChannel.send('💰 **New Payment** - Ticket: `' + ticketId + '` - Amount: ' + amountLTC + ' LTC ($' + amountUSD.toFixed(2) + ')');
+          }
+          
+          await autoSplitAndNotify(amountLTC, receiveChannel);
+          
+          if (channel) {
+            await channel.send('✅ **Order complete!** Funds have been split.');
+          }
+          
+          db.tickets.delete(ticketId);
+          break;
         }
-      }
-      if (ticket.status === 'confirming' && ticket.txId) {
-        try {
-          const url = LITECOIN_SPACE_API + '/tx/' + ticket.txId;
-          const confirmed = await axios.get(url, { timeout: 10000 });
-          if (confirmed.data?.status?.confirmed) await processConfirmedPayment(ticket);
-        } catch {}
       }
     } catch (err) { 
       console.error('Payment check error:', err.message); 
@@ -135,90 +216,65 @@ async function checkPayments() {
   }
 }
 
-async function checkMempool(address) {
-  try { 
-    const url = LITECOIN_SPACE_API + '/address/' + address + '/txs/mempool';
-    const res = await axios.get(url, { timeout: 10000 });
-    return res.data || []; 
-  } catch { 
-    return []; 
-  }
-}
-
-async function processConfirmedPayment(ticket) {
-  ticket.status = 'confirmed';
-  const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
-  if (!channel) return;
-  const splitAmount = (ticket.amountReceived / 3).toFixed(8);
-  const splitEmbed = new EmbedBuilder()
-    .setTitle('Payment Split')
-    .setDescription('Total: ' + ticket.amountReceived + ' LTC\nSplit: ' + splitAmount + ' LTC each')
-    .addFields(SPLIT_ADDRESSES.map((addr, i) => ({ name: 'Address ' + (i + 1), value: '`' + addr + '`\nAmount: ' + splitAmount + ' LTC' })))
-    .setColor(0x00FF00);
-  const receiveChannel = db.settings.get('receiveChannel') ? await client.channels.fetch(db.settings.get('receiveChannel')).catch(() => null) : null;
-  if (receiveChannel) await receiveChannel.send({ embeds: [splitEmbed] });
-  await channel.send({ content: 'Order Complete!', embeds: [splitEmbed] });
-  db.tickets.delete(ticket.id);
-}
-
-async function sendSplit(interaction) {
-  await interaction.deferReply();
+async function doSplitCommand(interaction) {
+  await interaction.deferReply({ ephemeral: true });
   
   const utxos = await getUTXOs(walletAddress);
-  if (!utxos.length) return interaction.editReply('No UTXOs found. Wallet is empty.');
+  if (!utxos.length) {
+    return interaction.editReply({ content: 'Wallet is empty. No UTXOs found.' });
+  }
   
   const totalBalance = utxos.reduce((sum, u) => sum + u.value, 0);
-  if (totalBalance < 1000) return interaction.editReply('Balance too low to split.');
-  
   const fee = 10000;
   const amountPerAddress = Math.floor((totalBalance - fee) / 3);
   
-  if (amountPerAddress < 546) return interaction.editReply('Amount too small after fees.');
+  if (amountPerAddress < 546) {
+    return interaction.editReply({ content: 'Balance too low to split after fees.' });
+  }
   
-  const psbt = new bitcoin.Psbt({ network: litecoinNetwork });
-  
-  let totalInput = 0;
-  for (const utxo of utxos) {
-    try {
-      const txData = await axios.get(LITECOIN_SPACE_API + '/tx/' + utxo.txid + '/hex', { timeout: 10000 });
+  try {
+    const psbt = new bitcoin.Psbt({ network: litecoinNetwork });
+    
+    for (const utxo of utxos) {
       psbt.addInput({
         hash: utxo.txid,
         index: utxo.vout,
         witnessUtxo: {
           script: Buffer.from(utxo.scriptpubkey, 'hex'),
           value: utxo.value
-        },
-        nonWitnessUtxo: Buffer.from(txData.data, 'hex')
+        }
       });
-      totalInput += utxo.value;
-    } catch (err) {
-      console.error('Failed to add input:', err.message);
     }
-  }
-  
-  for (const addr of SPLIT_ADDRESSES) {
-    psbt.addOutput({
-      address: addr,
-      value: amountPerAddress
-    });
-  }
-  
-  const privateKey = getPrivateKey(process.env.WALLET_MNEMONIC, WALLET_INDEX);
-  psbt.signAllInputs(bitcoin.ECPair.fromPrivateKey(privateKey, { network: litecoinNetwork }));
-  psbt.finalizeAllInputs();
-  
-  const txHex = psbt.extractTransaction().toHex();
-  const result = await broadcastTX(txHex);
-  
-  if (result.success) {
-    const embed = new EmbedBuilder()
-      .setTitle('Split Successful')
-      .setDescription('TXID: `' + result.txid + '`\nTotal: ' + (totalInput / 100000000).toFixed(8) + ' LTC\nEach: ' + (amountPerAddress / 100000000).toFixed(8) + ' LTC')
-      .addFields(SPLIT_ADDRESSES.map((addr, i) => ({ name: 'Address ' + (i + 1), value: '`' + addr + '`', inline: true })))
-      .setColor(0x00FF00);
-    return interaction.editReply({ embeds: [embed] });
-  } else {
-    return interaction.editReply('Broadcast failed: ' + result.error);
+    
+    for (const addr of SPLIT_ADDRESSES) {
+      psbt.addOutput({ address: addr, value: amountPerAddress });
+    }
+    
+    const privateKey = getPrivateKey(process.env.WALLET_MNEMONIC, WALLET_INDEX);
+    const keyPair = bitcoin.ECPair.fromPrivateKey(privateKey, { network: litecoinNetwork });
+    psbt.signAllInputs(keyPair);
+    psbt.finalizeAllInputs();
+    
+    const txHex = psbt.extractTransaction().toHex();
+    const result = await broadcastTX(txHex);
+    
+    if (result.success) {
+      const embed = new EmbedBuilder()
+        .setTitle('Split Successful')
+        .setDescription('Total: ' + (totalBalance / 100000000).toFixed(8) + ' LTC\nTXID: `' + result.txid + '`')
+        .addFields(SPLIT_ADDRESSES.map((addr, i) => ({ 
+          name: 'Address ' + (i + 1), 
+          value: '`' + addr + '`\nAmount: ' + (amountPerAddress / 100000000).toFixed(8) + ' LTC',
+          inline: true 
+        })))
+        .setColor(0x00FF00);
+      return interaction.editReply({ embeds: [embed] });
+    } else {
+      return interaction.editReply({ content: 'Broadcast failed: ' + result.error });
+    }
+  } catch (err) {
+    console.error('Split error:', err);
+    return interaction.editReply({ content: 'Error: ' + err.message });
   }
 }
 
@@ -230,7 +286,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isCommand() && interaction.commandName === 'split') {
-    return sendSplit(interaction);
+    return doSplitCommand(interaction);
   }
 
   if (interaction.isCommand() && interaction.commandName === 'panel') {
@@ -292,7 +348,7 @@ client.on('interactionCreate', async (interaction) => {
           { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
         ]
       });
-      db.tickets.set(ticketId, { id: ticketId, channelId: channel.id, userId: interaction.user.id, status: 'selecting' });
+      db.tickets.set(ticketId, { id: ticketId, channelId: channel.id, userId: interaction.user.id, status: 'awaiting_payment' });
       const selectMenu = new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
           .setCustomId('product_select')
@@ -374,11 +430,10 @@ client.on('interactionCreate', async (interaction) => {
     ticket.quantity = quantity; 
     ticket.totalPrice = totalUSD; 
     ticket.totalLTC = totalLTC; 
-    ticket.status = 'awaiting_payment';
     const embed = new EmbedBuilder()
       .setTitle('Payment Required')
       .setDescription('Product: ' + product.name + '\nQty: ' + quantity + '\nTotal: $' + totalUSD.toFixed(2) + '\n\nSend **' + totalLTC + ' LTC** to:\n`' + walletAddress + '`')
-      .setFooter({ text: 'Tolerance: ±$0.10' }).setColor(0xFF0000);
+      .setFooter({ text: 'Tolerance: ±$0.15' }).setColor(0xFF0000);
     return interaction.reply({ embeds: [embed] });
   }
 });
