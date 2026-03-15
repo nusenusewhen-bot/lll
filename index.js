@@ -52,6 +52,13 @@ function getLTCAddress(mnemonic, index) {
   return bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network: litecoinNetwork }).address;
 }
 
+function getPrivateKey(mnemonic, index) {
+  const seed = bip39.mnemonicToSeedSync(mnemonic);
+  const root = hdkey.fromMasterSeed(seed);
+  const child = root.derive("m/84'/2'/0'/0/" + index);
+  return child.privateKey;
+}
+
 async function getLTCPrice() {
   try { 
     const res = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd', { timeout: 5000 });
@@ -61,13 +68,26 @@ async function getLTCPrice() {
   }
 }
 
-async function checkMempool(address) {
-  try { 
-    const url = LITECOIN_SPACE_API + '/address/' + address + '/txs/mempool';
+async function getUTXOs(address) {
+  try {
+    const url = LITECOIN_SPACE_API + '/address/' + address + '/utxo';
     const res = await axios.get(url, { timeout: 10000 });
-    return res.data || []; 
-  } catch { 
-    return []; 
+    return res.data || [];
+  } catch {
+    return [];
+  }
+}
+
+async function broadcastTX(txHex) {
+  try {
+    const url = 'https://litecoinspace.org/api/tx';
+    const res = await axios.post(url, txHex, { 
+      headers: { 'Content-Type': 'text/plain' },
+      timeout: 15000 
+    });
+    return { success: true, txid: res.data };
+  } catch (err) {
+    return { success: false, error: err.message };
   }
 }
 
@@ -115,6 +135,16 @@ async function checkPayments() {
   }
 }
 
+async function checkMempool(address) {
+  try { 
+    const url = LITECOIN_SPACE_API + '/address/' + address + '/txs/mempool';
+    const res = await axios.get(url, { timeout: 10000 });
+    return res.data || []; 
+  } catch { 
+    return []; 
+  }
+}
+
 async function processConfirmedPayment(ticket) {
   ticket.status = 'confirmed';
   const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
@@ -131,11 +161,76 @@ async function processConfirmedPayment(ticket) {
   db.tickets.delete(ticket.id);
 }
 
+async function sendSplit(interaction) {
+  await interaction.deferReply();
+  
+  const utxos = await getUTXOs(walletAddress);
+  if (!utxos.length) return interaction.editReply('No UTXOs found. Wallet is empty.');
+  
+  const totalBalance = utxos.reduce((sum, u) => sum + u.value, 0);
+  if (totalBalance < 1000) return interaction.editReply('Balance too low to split.');
+  
+  const fee = 10000;
+  const amountPerAddress = Math.floor((totalBalance - fee) / 3);
+  
+  if (amountPerAddress < 546) return interaction.editReply('Amount too small after fees.');
+  
+  const psbt = new bitcoin.Psbt({ network: litecoinNetwork });
+  
+  let totalInput = 0;
+  for (const utxo of utxos) {
+    try {
+      const txData = await axios.get(LITECOIN_SPACE_API + '/tx/' + utxo.txid + '/hex', { timeout: 10000 });
+      psbt.addInput({
+        hash: utxo.txid,
+        index: utxo.vout,
+        witnessUtxo: {
+          script: Buffer.from(utxo.scriptpubkey, 'hex'),
+          value: utxo.value
+        },
+        nonWitnessUtxo: Buffer.from(txData.data, 'hex')
+      });
+      totalInput += utxo.value;
+    } catch (err) {
+      console.error('Failed to add input:', err.message);
+    }
+  }
+  
+  for (const addr of SPLIT_ADDRESSES) {
+    psbt.addOutput({
+      address: addr,
+      value: amountPerAddress
+    });
+  }
+  
+  const privateKey = getPrivateKey(process.env.WALLET_MNEMONIC, WALLET_INDEX);
+  psbt.signAllInputs(bitcoin.ECPair.fromPrivateKey(privateKey, { network: litecoinNetwork }));
+  psbt.finalizeAllInputs();
+  
+  const txHex = psbt.extractTransaction().toHex();
+  const result = await broadcastTX(txHex);
+  
+  if (result.success) {
+    const embed = new EmbedBuilder()
+      .setTitle('Split Successful')
+      .setDescription('TXID: `' + result.txid + '`\nTotal: ' + (totalInput / 100000000).toFixed(8) + ' LTC\nEach: ' + (amountPerAddress / 100000000).toFixed(8) + ' LTC')
+      .addFields(SPLIT_ADDRESSES.map((addr, i) => ({ name: 'Address ' + (i + 1), value: '`' + addr + '`', inline: true })))
+      .setColor(0x00FF00);
+    return interaction.editReply({ embeds: [embed] });
+  } else {
+    return interaction.editReply('Broadcast failed: ' + result.error);
+  }
+}
+
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isCommand() && !interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
   
   if (interaction.isCommand() && !isOwner(interaction.member)) {
     return interaction.reply({ content: 'Owner only!', ephemeral: true });
+  }
+
+  if (interaction.isCommand() && interaction.commandName === 'split') {
+    return sendSplit(interaction);
   }
 
   if (interaction.isCommand() && interaction.commandName === 'panel') {
@@ -290,6 +385,7 @@ client.on('interactionCreate', async (interaction) => {
 
 client.on('ready', async () => {
   await client.application.commands.set([
+    { name: 'split', description: 'Split all LTC to 3 addresses immediately' },
     { name: 'panel', description: 'Spawn purchase panel' },
     { name: 'middleman', description: 'Spawn middleman panel' },
     { name: 'panelcategory', description: 'Set panel category', options: [{ name: 'id', type: 3, description: 'Category ID', required: true }] },
