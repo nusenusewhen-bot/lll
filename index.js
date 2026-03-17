@@ -384,24 +384,38 @@ function setupSelfbotCommands(selfbot, delaySeconds, selfbotUserId) {
   const userPings = new Map();
   
   console.log(`[SELFBOT] Setting up commands for selfbot user ID: ${selfbotUserId} with ${delaySeconds}s delay`);
+  console.log(`[SELFBOT] Selfbot logged in as: ${selfbot.user.tag} (${selfbot.user.id})`);
   
-  // Monitor ALL messages from ANYWHERE (DMs, all servers, all channels)
+  // IMPORTANT: Listen on ALL shards/guilds - no filtering
   selfbot.on('messageCreate', async (message) => {
+    console.log(`[DEBUG] Message received: "${message.content}" from ${message.author.username} (${message.author.id}) in ${message.guild?.name || 'DMs'}`);
+    
     // Ignore bot's own messages to prevent loops
-    if (message.author.id === selfbot.user.id) return;
+    if (message.author.id === selfbot.user.id) {
+      console.log('[DEBUG] Ignoring own message');
+      return;
+    }
     
     // ONLY respond to the selfbot owner (the user who set the token)
-    if (message.author.id !== selfbotUserId) return;
+    if (message.author.id !== selfbotUserId) {
+      console.log(`[DEBUG] Ignoring message from ${message.author.id}, expected ${selfbotUserId}`);
+      return;
+    }
     
     const content = message.content;
     
     // Must start with prefix
-    if (!content.startsWith(prefix)) return;
+    if (!content.startsWith(prefix)) {
+      console.log(`[DEBUG] Message doesn't start with prefix "${prefix}"`);
+      return;
+    }
     
     console.log(`[CMD] Selfbot user ${message.author.username}: ${content} in ${!message.guild ? 'DMs' : message.guild.name + '/' + message.channel.name}`);
     
     const args = content.slice(prefix.length).trim().split(/ +/);
     const cmd = args.shift().toLowerCase();
+    
+    console.log(`[CMD] Executing command: ${cmd}, args:`, args);
     
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const reply = async (content) => {
