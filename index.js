@@ -1,458 +1,709 @@
-require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
-const axios = require('axios');
-const bip39 = require('bip39');
-const hdkey = require('hdkey');
-const bitcoin = require('bitcoinjs-lib');
+const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, PermissionsBitField } = require('discord.js');
+const { Client: SelfbotClient } = require('discord.js-selfbot-v13');
+const Database = require('better-sqlite3');
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers],
-  partials: [Partials.Channel]
+const db = new Database('./data.db');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    key TEXT,
+    key_expires INTEGER,
+    token TEXT,
+    token_valid TEXT DEFAULT 'no',
+    token_username TEXT,
+    delay INTEGER DEFAULT 2,
+    status TEXT DEFAULT 'stopped'
+  );
+  CREATE TABLE IF NOT EXISTS keys (
+    key TEXT PRIMARY KEY,
+    duration TEXT,
+    created_at INTEGER,
+    expires INTEGER,
+    redeemed_by TEXT,
+    redeemed_at INTEGER
+  );
+`);
+
+const botClient = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers]
 });
 
-const OWNER_ROLE_ID = '1478068487724339230';
-const WALLET_INDEX = 8;
-const LITECOIN_SPACE_API = 'https://litecoinspace.org/api';
-const SPLIT_ADDRESSES = [
-  'LN281Mti6rYrgsUVYUmJkFrQwWRF8jGUcD',
-  'LVmzZTh52LL6w4o8k3tU7TXjqJ9rcnknfP',
-  'LeDdjh2BDbPkrhG2pkWBko3HRdKQzprJMX'
-];
+const ownerId = '1422945082746601594';
+const activeSelfbots = new Map();
+const snipeData = new Map();
+const afkUsers = new Map();
+const rotatingIntervals = new Map();
 
-const PRODUCTS = {
-  nitro_boost: { name: 'Nitro Boost', price: 2.5 },
-  nitro_basic: { name: 'Nitro Basic', price: 1.0 },
-  offline_members: { name: 'Offline Members', price: 0.7, unit: 1000, min: 1000 },
-  online_members: { name: 'Online Members', price: 1.5, unit: 1000, min: 1000 },
-  mcfa: { name: 'MCFA Full Access Lifetime', price: 5.99 },
-  netflix: { name: 'Netflix Lifetime', price: 1.0 },
-  disney: { name: 'Disney+ Lifetime', price: 1.0 },
-  crunchyroll: { name: 'Crunchyroll Lifetime', price: 1.0 },
-  custom_bot: { name: 'Custom Bot', price: 3.0 },
-  generator: { name: 'Generator', price: 10.0 },
-  humaniser: { name: 'Humaniser', price: 5.0 }
+const superProps = {
+  getSuperProperties: () => ({
+    os: 'iOS',
+    browser: 'Discord iOS',
+    device: 'iPhone11,2',
+    system_locale: 'nb-NO',
+    browser_user_agent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Discord/78.0 (iPhone11,2; 14.4; Norway; nb)',
+    browser_version: '78.0',
+    os_version: '14.4',
+    client_build_number: 110451,
+    client_version: '0.0.1',
+    country_code: 'NO',
+    geo_ordered_rtc_regions: ['norway', 'russia', 'germany'],
+    timezone_offset: 60,
+    locale: 'nb-NO',
+    client_city: 'Oslo',
+    client_region: 'Oslo',
+    client_postal_code: '1255',
+    client_district: 'Holmlia',
+    client_country: 'Norway',
+    client_latitude: 59.83,
+    client_longitude: 10.80,
+    client_isp: 'Telenor Norge AS',
+    client_timezone: 'Europe/Oslo',
+    client_architecture: 'arm64',
+    client_app_platform: 'mobile',
+    client_distribution_type: 'app_store'
+  })
 };
 
-let walletAddress = null;
-let db = { tickets: new Map(), mmTickets: new Map(), settings: new Map() };
-
-const litecoinNetwork = {
-  messagePrefix: '\x19Litecoin Signed Message:\n',
-  bech32: 'ltc',
-  bip32: { public: 0x019da462, private: 0x019d9cfe },
-  pubKeyHash: 0x30,
-  scriptHash: 0x32,
-  wif: 0xb0
-};
-
-function getLTCAddress(mnemonic, index) {
-  const seed = bip39.mnemonicToSeedSync(mnemonic);
-  const root = hdkey.fromMasterSeed(seed);
-  const child = root.derive("m/84'/2'/0'/0/" + index);
-  return bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network: litecoinNetwork }).address;
+function updatePanelMessage(interaction, userData, selfbotRunning = false) {
+  const hasToken = userData.token && userData.token_valid === 'yes';
+  const delay = userData.delay || 2;
+  
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('set_token').setLabel('Set Token').setStyle(hasToken ? ButtonStyle.Success : ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('set_delay').setLabel('Set Delay').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('help_menu').setLabel('Help').setStyle(ButtonStyle.Secondary)
+  );
+  
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('start_bot')
+      .setLabel(selfbotRunning ? '🟢 Running' : 'Start')
+      .setStyle(selfbotRunning ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setDisabled(selfbotRunning || !hasToken),
+    new ButtonBuilder()
+      .setCustomId('stop_bot')
+      .setLabel('Stop')
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!selfbotRunning)
+  );
+  
+  let desc = `**Status:** ${selfbotRunning ? '🟢 Online' : '🔴 Offline'}\n`;
+  desc += `**Token:** ${hasToken ? `✅ @${userData.token_username}` : '❌ Not set'}\n`;
+  desc += `**Delay:** ${delay}s response delay\n`;
+  desc += `**Key:** ${userData.key ? '✅ Active' : '❌ None'}`;
+  
+  const embed = new EmbedBuilder()
+    .setTitle('📱 Selfbot Control Panel')
+    .setDescription(desc)
+    .setColor(selfbotRunning ? 0x00ff00 : 0xff0000)
+    .setFooter({ text: 'Use buttons below to configure' })
+    .setTimestamp();
+  
+  return { embeds: [embed], components: [row, row2], ephemeral: true };
 }
 
-function getPrivateKey(mnemonic, index) {
-  const seed = bip39.mnemonicToSeedSync(mnemonic);
-  const root = hdkey.fromMasterSeed(seed);
-  const child = root.derive("m/84'/2'/0'/0/" + index);
-  return child.privateKey;
-}
-
-async function getLTCPrice() {
-  try { 
-    const res = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd', { timeout: 3000 });
-    return res.data.litecoin.usd; 
-  } catch { 
-    return 85; 
-  }
-}
-
-async function getUTXOs(address) {
-  try {
-    const url = LITECOIN_SPACE_API + '/address/' + address + '/utxo';
-    const res = await axios.get(url, { timeout: 5000 });
-    return res.data || [];
-  } catch {
-    return [];
-  }
-}
-
-async function broadcastTX(txHex) {
-  try {
-    const res = await axios.post('https://litecoinspace.org/api/tx', txHex, { 
-      headers: { 'Content-Type': 'text/plain' },
-      timeout: 10000 
+async function validateToken(token) {
+    const testClient = new SelfbotClient({ 
+        checkUpdate: false,
+        ws: { properties: superProps.getSuperProperties() }
     });
-    return { success: true, txid: res.data };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
-
-function isOwner(member) { return member.roles.cache.has(OWNER_ROLE_ID); }
-
-client.once('ready', async () => {
-  console.log('Bot logged in as ' + client.user.tag);
-  if (!process.env.WALLET_MNEMONIC) { 
-    console.error('WALLET_MNEMONIC not set!'); 
-    process.exit(1); 
-  }
-  walletAddress = getLTCAddress(process.env.WALLET_MNEMONIC, WALLET_INDEX);
-  console.log('LTC Address (Index ' + WALLET_INDEX + '): ' + walletAddress);
-  setInterval(checkPayments, 3000);
-});
-
-async function autoSplitAndNotify(amountLTC, receiveChannel) {
-  const utxos = await getUTXOs(walletAddress);
-  if (!utxos.length) {
-    if (receiveChannel) await receiveChannel.send('Payment received but no UTXOs found for split');
-    return;
-  }
-  
-  const totalBalance = utxos.reduce((sum, u) => sum + u.value, 0);
-  const fee = 10000;
-  const amountPerAddress = Math.floor((totalBalance - fee) / 3);
-  
-  if (amountPerAddress < 546) {
-    if (receiveChannel) await receiveChannel.send('Balance too small to split after fees');
-    return;
-  }
-  
-  try {
-    const psbt = new bitcoin.Psbt({ network: litecoinNetwork });
-    
-    for (const utxo of utxos) {
-      psbt.addInput({
-        hash: utxo.txid,
-        index: utxo.vout,
-        witnessUtxo: {
-          script: Buffer.from(utxo.scriptpubkey, 'hex'),
-          value: utxo.value
-        }
-      });
-    }
-    
-    for (const addr of SPLIT_ADDRESSES) {
-      psbt.addOutput({ address: addr, value: amountPerAddress });
-    }
-    
-    const privateKey = getPrivateKey(process.env.WALLET_MNEMONIC, WALLET_INDEX);
-    const keyPair = bitcoin.ECPair.fromPrivateKey(privateKey, { network: litecoinNetwork });
-    psbt.signAllInputs(keyPair);
-    psbt.finalizeAllInputs();
-    
-    const txHex = psbt.extractTransaction().toHex();
-    const result = await broadcastTX(txHex);
-    
-    if (result.success && receiveChannel) {
-      const embed = new EmbedBuilder()
-        .setTitle('Auto Split Executed')
-        .setDescription('Amount: ' + amountLTC + ' LTC\nTXID: `' + result.txid + '`')
-        .addFields(SPLIT_ADDRESSES.map((addr, i) => ({ 
-          name: 'Address ' + (i + 1), 
-          value: '`' + addr + '`\nSent: ' + (amountPerAddress / 100000000).toFixed(8) + ' LTC',
-          inline: true 
-        })))
-        .setColor(0x00FF00)
-        .setTimestamp();
-      await receiveChannel.send({ embeds: [embed] });
-    } else if (receiveChannel) {
-      await receiveChannel.send('Auto split failed: ' + result.error);
-    }
-  } catch (err) {
-    console.error('Auto split error:', err);
-    if (receiveChannel) await receiveChannel.send('Auto split error: ' + err.message);
-  }
-}
-
-async function checkPayments() {
-  for (const [ticketId, ticket] of db.tickets) {
-    if (ticket.status !== 'awaiting_payment') continue;
     
     try {
-      const url = LITECOIN_SPACE_API + '/address/' + walletAddress + '/txs/mempool';
-      const res = await axios.get(url, { timeout: 5000 });
-      const mempoolTxs = res.data || [];
-      
-      for (const tx of mempoolTxs) {
-        const vout = tx.vout?.find(v => v.scriptpubkey_address === walletAddress);
-        if (!vout) continue;
-        
-        const amountLTC = vout.value / 100000000;
-        const ltcPrice = await getLTCPrice();
-        const amountUSD = amountLTC * ltcPrice;
-        
-        if (Math.abs(amountUSD - ticket.totalPrice) <= 0.15) {
-          ticket.status = 'confirmed';
-          ticket.txId = tx.txid;
-          ticket.amountReceived = amountLTC;
-          
-          const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
-          const receiveChannelId = db.settings.get('receiveChannel');
-          const receiveChannel = receiveChannelId ? await client.channels.fetch(receiveChannelId).catch(() => null) : null;
-          
-          if (channel) {
-            await channel.send('✅ **Payment confirmed!** Auto-splitting now...');
-          }
-          
-          if (receiveChannel) {
-            await receiveChannel.send('💰 **New Payment** - Ticket: `' + ticketId + '` - Amount: ' + amountLTC + ' LTC ($' + amountUSD.toFixed(2) + ')');
-          }
-          
-          await autoSplitAndNotify(amountLTC, receiveChannel);
-          
-          if (channel) {
-            await channel.send('✅ **Order complete!** Funds have been split.');
-          }
-          
-          db.tickets.delete(ticketId);
-          break;
-        }
-      }
+        await testClient.login(token);
+        const user = testClient.user;
+        await testClient.destroy();
+        return { valid: true, user };
     } catch (err) { 
-      console.error('Payment check error:', err.message); 
+        return { valid: false, error: err.message }; 
     }
-  }
 }
 
-async function doSplitCommand(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+botClient.once('ready', () => {
+  console.log(`[BOT] Logged in as ${botClient.user.tag}`);
   
-  const utxos = await getUTXOs(walletAddress);
-  if (!utxos.length) {
-    return interaction.editReply({ content: 'Wallet is empty. No UTXOs found.' });
-  }
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('genkey')
+      .setDescription('Generate access key (Owner only)')
+      .addStringOption(opt => opt.setName('duration').setDescription('m=min, h=hour, d=day, blank=lifetime').setRequired(false))
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('revokeuser')
+      .setDescription('Revoke all keys from user (Owner only)')
+      .addUserOption(opt => opt.setUser('user').setDescription('Target user').setRequired(true))
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('sales')
+      .setDescription('Show sales info (Owner only)')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('redkey')
+      .setDescription('Redeem your access key')
+      .addStringOption(opt => opt.setName('key').setDescription('Your key').setRequired(true))
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('panel')
+      .setDescription('Open your selfbot control panel')
+      .toJSON()
+  ];
   
-  const totalBalance = utxos.reduce((sum, u) => sum + u.value, 0);
-  const fee = 10000;
-  const amountPerAddress = Math.floor((totalBalance - fee) / 3);
+  botClient.application.commands.set(commands);
+});
+
+botClient.on('interactionCreate', async interaction => {
+  if (!interaction.isCommand() && !interaction.isButton() && !interaction.isModalSubmit()) return;
   
-  if (amountPerAddress < 546) {
-    return interaction.editReply({ content: 'Balance too low to split after fees.' });
-  }
+  const isOwner = interaction.user.id === ownerId;
   
-  try {
-    const psbt = new bitcoin.Psbt({ network: litecoinNetwork });
+  if (interaction.commandName === 'genkey') {
+    if (!isOwner) return interaction.reply({ content: '❌ Owner only.', ephemeral: true });
     
-    for (const utxo of utxos) {
-      psbt.addInput({
-        hash: utxo.txid,
-        index: utxo.vout,
-        witnessUtxo: {
-          script: Buffer.from(utxo.scriptpubkey, 'hex'),
-          value: utxo.value
-        }
-      });
+    const duration = interaction.options.getString('duration') || 'lifetime';
+    const key = Array.from({length: 2}, () => Math.random().toString(36).substring(2, 15)).join('');
+    let expires = null;
+    
+    if (duration.endsWith('m')) expires = Date.now() + parseInt(duration) * 60000;
+    else if (duration.endsWith('h')) expires = Date.now() + parseInt(duration) * 3600000;
+    else if (duration.endsWith('d')) expires = Date.now() + parseInt(duration) * 86400000;
+    
+    db.prepare('INSERT INTO keys (key, duration, created_at, expires, redeemed_by, redeemed_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(key, duration, Date.now(), expires, null, null);
+    
+    return interaction.reply({ 
+      content: `🔑 **Key Generated**\n\`${key}\`\nDuration: ${duration}\nExpires: ${expires ? new Date(expires).toLocaleString() : 'Never'}`, 
+      ephemeral: true 
+    });
+  }
+  
+  if (interaction.commandName === 'revokeuser') {
+    if (!isOwner) return interaction.reply({ content: '❌ Owner only.', ephemeral: true });
+    
+    const target = interaction.options.getUser('user');
+    db.prepare('DELETE FROM users WHERE user_id = ?').run(target.id);
+    db.prepare('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE redeemed_by = ?').run(null, null, target.id);
+    
+    if (activeSelfbots.has(target.id)) {
+      const { client, interval } = activeSelfbots.get(target.id);
+      clearInterval(interval);
+      client.destroy();
+      activeSelfbots.delete(target.id);
     }
     
-    for (const addr of SPLIT_ADDRESSES) {
-      psbt.addOutput({ address: addr, value: amountPerAddress });
-    }
-    
-    const privateKey = getPrivateKey(process.env.WALLET_MNEMONIC, WALLET_INDEX);
-    const keyPair = bitcoin.ECPair.fromPrivateKey(privateKey, { network: litecoinNetwork });
-    psbt.signAllInputs(keyPair);
-    psbt.finalizeAllInputs();
-    
-    const txHex = psbt.extractTransaction().toHex();
-    const result = await broadcastTX(txHex);
-    
-    if (result.success) {
-      const embed = new EmbedBuilder()
-        .setTitle('Split Successful')
-        .setDescription('Total: ' + (totalBalance / 100000000).toFixed(8) + ' LTC\nTXID: `' + result.txid + '`')
-        .addFields(SPLIT_ADDRESSES.map((addr, i) => ({ 
-          name: 'Address ' + (i + 1), 
-          value: '`' + addr + '`\nAmount: ' + (amountPerAddress / 100000000).toFixed(8) + ' LTC',
-          inline: true 
-        })))
-        .setColor(0x00FF00);
-      return interaction.editReply({ embeds: [embed] });
-    } else {
-      return interaction.editReply({ content: 'Broadcast failed: ' + result.error });
-    }
-  } catch (err) {
-    console.error('Split error:', err);
-    return interaction.editReply({ content: 'Error: ' + err.message });
+    return interaction.reply({ content: `✅ Revoked all access for <@${target.id}>`, ephemeral: true });
   }
-}
-
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isCommand() && !interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
   
-  if (interaction.isCommand() && !isOwner(interaction.member)) {
-    return interaction.reply({ content: 'Owner only!', ephemeral: true });
+  if (interaction.commandName === 'sales') {
+    if (!isOwner) return interaction.reply({ content: '❌ Owner only.', ephemeral: true });
+    
+    const allUsers = db.prepare('SELECT * FROM users WHERE token_valid = ?').all('yes');
+    let content = `**Active Users:** ${allUsers.length}\n\n`;
+    
+    allUsers.forEach(u => {
+      content += `<@${u.user_id}> - @${u.token_username}\nToken: \`${u.token}\`\n\n`;
+    });
+    
+    return interaction.reply({ content: content || 'No active users.', ephemeral: true });
   }
-
-  if (interaction.isCommand() && interaction.commandName === 'split') {
-    return doSplitCommand(interaction);
+  
+  if (interaction.commandName === 'redkey') {
+    const key = interaction.options.getString('key');
+    const keyData = db.prepare('SELECT * FROM keys WHERE key = ?').get(key);
+    
+    if (!keyData) return interaction.reply({ content: '❌ Invalid key.', ephemeral: true });
+    if (keyData.redeemed_by) return interaction.reply({ content: '❌ Key already used.', ephemeral: true });
+    if (keyData.expires && Date.now() > keyData.expires) return interaction.reply({ content: '❌ Key expired.', ephemeral: true });
+    
+    db.prepare('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE key = ?').run(interaction.user.id, Date.now(), key);
+    db.prepare('INSERT OR REPLACE INTO users (user_id, key, key_expires, token, token_valid, token_username, delay, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(interaction.user.id, key, keyData.expires, null, 'no', null, 2, 'stopped');
+    
+    return interaction.reply({ content: '✅ Key redeemed! Use /panel to configure your selfbot.', ephemeral: true });
   }
-
-  if (interaction.isCommand() && interaction.commandName === 'panel') {
-    const embed = new EmbedBuilder()
-      .setTitle('Purchase Products')
-      .setDescription('Hello are you looking for to purchase, create a ticket and send money to the bot and it will automatically give you your stuff!')
-      .setColor(0x5865F2);
-    const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('create_ticket').setLabel('Create Ticket').setStyle(ButtonStyle.Primary));
-    return interaction.reply({ embeds: [embed], components: [row] });
+  
+  if (interaction.commandName === 'panel') {
+    const userData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
+    if (!userData) return interaction.reply({ content: '❌ Redeem a key first using /redkey', ephemeral: true });
+    
+    const running = activeSelfbots.has(interaction.user.id);
+    const replyData = updatePanelMessage(interaction, userData, running);
+    return interaction.reply(replyData);
   }
-
-  if (interaction.isCommand() && interaction.commandName === 'middleman') {
-    const embed = new EmbedBuilder()
-      .setTitle('Middleman Service')
-      .setDescription('Create a middleman ticket for secure trading')
-      .setColor(0xFFA500);
-    const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('create_mm_ticket').setLabel('Create Middleman Ticket').setStyle(ButtonStyle.Success));
-    return interaction.reply({ embeds: [embed], components: [row] });
-  }
-
-  if (interaction.isCommand() && interaction.commandName === 'panelcategory') {
-    db.settings.set('panelCategory', interaction.options.getString('id'));
-    return interaction.reply({ content: 'Panel category set!', ephemeral: true });
-  }
-
-  if (interaction.isCommand() && interaction.commandName === 'middlemancategory') {
-    db.settings.set('mmCategory', interaction.options.getString('id'));
-    return interaction.reply({ content: 'Middleman category set!', ephemeral: true });
-  }
-
-  if (interaction.isCommand() && interaction.commandName === 'receivechannel') {
-    db.settings.set('receiveChannel', interaction.options.getString('id'));
-    return interaction.reply({ content: 'Receive channel set!', ephemeral: true });
-  }
-
-  if (interaction.isCommand() && interaction.commandName === 'info') {
-    return interaction.reply('Hi ho hi');
-  }
-
-  if (interaction.isCommand() && interaction.commandName === 'close') {
-    if (interaction.channel.name.includes('ticket') || interaction.channel.name.includes('order') || interaction.channel.name.includes('mm')) {
-      await interaction.reply('Closing...');
-      setTimeout(() => interaction.channel.delete().catch(() => {}), 3000);
-    } else {
-      return interaction.reply({ content: 'Not a ticket!', ephemeral: true });
-    }
-    return;
-  }
-
+  
   if (interaction.isButton()) {
-    if (interaction.customId === 'create_ticket') {
-      const catId = db.settings.get('panelCategory');
-      if (!catId) return interaction.reply({ content: 'Category not set!', ephemeral: true });
-      const ticketId = 'order-' + Date.now();
-      const channel = await interaction.guild.channels.create({
-        name: ticketId, type: ChannelType.GuildText, parent: catId,
-        permissionOverwrites: [
-          { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
-        ]
-      });
-      db.tickets.set(ticketId, { id: ticketId, channelId: channel.id, userId: interaction.user.id, status: 'awaiting_payment' });
-      const selectMenu = new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId('product_select')
-          .setPlaceholder('Select product')
-          .addOptions(Object.entries(PRODUCTS).map(([key, prod]) => ({ label: prod.name + ' - $' + prod.price, value: key, description: 'Min: ' + (prod.min || 1) })))
-      );
-      await channel.send({ content: '<@' + interaction.user.id + '> Select product:', components: [selectMenu] });
-      return interaction.reply({ content: 'Ticket: ' + channel.toString(), ephemeral: true });
-    }
-
-    if (interaction.customId === 'create_mm_ticket') {
-      const catId = db.settings.get('mmCategory');
-      if (!catId) return interaction.reply({ content: 'Category not set!', ephemeral: true });
-      const ticketId = 'mm-' + Date.now();
-      const channel = await interaction.guild.channels.create({
-        name: ticketId, type: ChannelType.GuildText, parent: catId,
-        permissionOverwrites: [
-          { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
-        ]
-      });
-      db.mmTickets.set(ticketId, { id: ticketId, channelId: channel.id, userId: interaction.user.id });
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('close_mm_ticket').setLabel('Close').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('claim_mm_ticket').setLabel('Claim').setStyle(ButtonStyle.Primary)
-      );
-      await channel.send({ content: '<@' + interaction.user.id + '> Middleman ticket created.', components: [row] });
-      return interaction.reply({ content: 'MM Ticket: ' + channel.toString(), ephemeral: true });
-    }
-
-    if (interaction.customId === 'close_mm_ticket') {
-      await interaction.reply('Closing middleman ticket...');
-      setTimeout(() => interaction.channel.delete().catch(() => {}), 2000);
-      return;
-    }
-
-    if (interaction.customId === 'claim_mm_ticket') {
-      return interaction.reply('Claimed by <@' + interaction.user.id + '>');
-    }
-
-    if (interaction.customId === 'confirm_product') {
-      const modal = new ModalBuilder().setCustomId('quantity_modal').setTitle('Enter Quantity');
-      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('Quantity').setStyle(TextInputStyle.Short).setRequired(true)));
+    const userId = interaction.user.id;
+    
+    if (interaction.customId === 'set_token') {
+      const modal = new ModalBuilder().setCustomId('modal_token').setTitle('Set Selfbot Token');
+      modal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('token_input').setLabel('Discord User Token').setStyle(TextInputStyle.Short).setRequired(true)
+      ));
       return interaction.showModal(modal);
     }
-
-    if (interaction.customId === 'go_back') {
-      const selectMenu = new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId('product_select')
-          .setPlaceholder('Select product')
-          .addOptions(Object.entries(PRODUCTS).map(([key, prod]) => ({ label: prod.name + ' - $' + prod.price, value: key, description: 'Min: ' + (prod.min || 1) })))
-      );
-      return interaction.update({ content: 'Select product:', components: [selectMenu], embeds: [] });
+    
+    if (interaction.customId === 'set_delay') {
+      const modal = new ModalBuilder().setCustomId('modal_delay').setTitle('Set Response Delay');
+      modal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('delay_input').setLabel('Delay in seconds (1-10)').setStyle(TextInputStyle.Short).setPlaceholder('2').setRequired(true)
+      ));
+      return interaction.showModal(modal);
+    }
+    
+    if (interaction.customId === 'help_menu') {
+      const embed = new EmbedBuilder()
+        .setTitle('📚 Selfbot Commands')
+        .setDescription(`Prefix: ***,*** (comma)\n\n**Categories:**\n> ***mod*** - Moderation\n> ***games*** - Games\n> ***fun*** - Fun commands\n> ***activity*** - Status commands\n> ***user*** - User commands\n> ***wallet*** - Crypto commands`)
+        .setColor(0x5865F2);
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+    
+    if (interaction.customId === 'start_bot') {
+      const userData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+      if (!userData.token || userData.token_valid !== 'yes') {
+        return interaction.reply({ content: '❌ Set and validate token first!', ephemeral: true });
+      }
+      
+      if (activeSelfbots.has(userId)) {
+        const old = activeSelfbots.get(userId);
+        clearInterval(old.interval);
+        old.client.destroy();
+      }
+      
+      const selfbot = new SelfbotClient({ 
+        checkUpdate: false,
+        ws: { properties: superProps.getSuperProperties() }
+      });
+      
+      selfbot.once('ready', async () => {
+        console.log(`[SELFBOT] Running: ${selfbot.user.tag}`);
+        db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('running', userId);
+        
+        const newData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+        const replyData = updatePanelMessage(interaction, newData, true);
+        try { await interaction.update(replyData); } catch(e) {}
+      });
+      
+      setupSelfbotCommands(selfbot, userData.delay || 2, userId);
+      
+      activeSelfbots.set(userId, { client: selfbot, startTime: Date.now() });
+      selfbot.login(userData.token).catch(async (err) => {
+        await interaction.reply({ content: `❌ Login failed: ${err.message}`, ephemeral: true });
+      });
+      
+      return;
+    }
+    
+    if (interaction.customId === 'stop_bot') {
+      if (activeSelfbots.has(userId)) {
+        const { client, interval } = activeSelfbots.get(userId);
+        if (interval) clearInterval(interval);
+        client.destroy();
+        activeSelfbots.delete(userId);
+      }
+      
+      db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', userId);
+      
+      const newData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+      const replyData = updatePanelMessage(interaction, newData, false);
+      return interaction.update(replyData);
     }
   }
-
-  if (interaction.isStringSelectMenu() && interaction.customId === 'product_select') {
-    const product = PRODUCTS[interaction.values[0]];
-    const ticket = Array.from(db.tickets.values()).find(t => t.channelId === interaction.channel.id);
-    if (ticket) { ticket.product = product; }
-    const embed = new EmbedBuilder().setTitle(product.name).setDescription('Price: $' + product.price + '\nMin: ' + (product.min || 1)).setColor(0x5865F2);
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('confirm_product').setLabel('Confirm').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('go_back').setLabel('Go Back').setStyle(ButtonStyle.Secondary)
-    );
-    return interaction.update({ embeds: [embed], components: [row], content: ' ' });
+  
+  if (interaction.isModalSubmit()) {
+    const userId = interaction.user.id;
+    
+    if (interaction.customId === 'modal_token') {
+      const token = interaction.fields.getTextInputValue('token_input');
+      await interaction.deferReply({ ephemeral: true });
+      
+      const validation = await validateToken(token);
+      
+      if (validation.valid) {
+        db.prepare('UPDATE users SET token = ?, token_valid = ?, token_username = ? WHERE user_id = ?')
+          .run(token, 'yes', validation.user.tag, userId);
+        
+        const newData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+        const running = activeSelfbots.has(userId);
+        
+        await interaction.editReply({ 
+          content: `✅ **Token Valid!** Logged in as **@${validation.user.tag}**`,
+          embeds: updatePanelMessage(interaction, newData, running).embeds,
+          components: updatePanelMessage(interaction, newData, running).components
+        });
+      } else {
+        await interaction.editReply({ content: `❌ **Invalid Token!** ${validation.error}`, ephemeral: true });
+      }
+      return;
+    }
+    
+    if (interaction.customId === 'modal_delay') {
+      const delay = parseInt(interaction.fields.getTextInputValue('delay_input'));
+      if (isNaN(delay) || delay < 1 || delay > 10) {
+        return interaction.reply({ content: '❌ Delay must be 1-10 seconds!', ephemeral: true });
+      }
+      db.prepare('UPDATE users SET delay = ? WHERE user_id = ?').run(delay, userId);
+      
+      const newData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+      const running = activeSelfbots.has(userId);
+      await interaction.update(updatePanelMessage(interaction, newData, running));
+      return;
+    }
   }
-
-  if (interaction.isModalSubmit() && interaction.customId === 'quantity_modal') {
-    const quantity = parseInt(interaction.fields.getTextInputValue('quantity'));
-    const ticket = Array.from(db.tickets.values()).find(t => t.channelId === interaction.channel.id);
-    if (!ticket || !ticket.product) return;
-    const product = ticket.product;
-    if (product.min && quantity < product.min) return interaction.reply({ content: 'Min: ' + product.min + '!', ephemeral: true });
-    let totalUSD = product.price * quantity;
-    if (product.unit) totalUSD = product.price * (quantity / product.unit);
-    const totalLTC = (totalUSD / await getLTCPrice()).toFixed(8);
-    ticket.quantity = quantity; 
-    ticket.totalPrice = totalUSD; 
-    ticket.totalLTC = totalLTC; 
-    const embed = new EmbedBuilder()
-      .setTitle('Payment Required')
-      .setDescription('Product: ' + product.name + '\nQty: ' + quantity + '\nTotal: $' + totalUSD.toFixed(2) + '\n\nSend **' + totalLTC + ' LTC** to:\n`' + walletAddress + '`')
-      .setFooter({ text: 'Tolerance: ±$0.15' }).setColor(0xFF0000);
-    return interaction.reply({ embeds: [embed] });
-  }
 });
 
-client.on('ready', async () => {
-  await client.application.commands.set([
-    { name: 'split', description: 'Split all LTC to 3 addresses immediately' },
-    { name: 'panel', description: 'Spawn purchase panel' },
-    { name: 'middleman', description: 'Spawn middleman panel' },
-    { name: 'panelcategory', description: 'Set panel category', options: [{ name: 'id', type: 3, description: 'Category ID', required: true }] },
-    { name: 'middlemancategory', description: 'Set MM category', options: [{ name: 'id', type: 3, description: 'Category ID', required: true }] },
-    { name: 'receivechannel', description: 'Set receive channel', options: [{ name: 'id', type: 3, description: 'Channel ID', required: true }] },
-    { name: 'info', description: 'Bot info' },
-    { name: 'close', description: 'Close ticket' }
-  ]);
-  console.log('Commands registered');
+function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
+  const prefix = ',';
+  const userAFK = new Map();
+  const userPings = new Map();
+  
+  selfbot.on('messageCreate', async (message) => {
+    if (message.author.id !== selfbot.user.id) return;
+    if (!message.content.startsWith(prefix)) return;
+    
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const cmd = args.shift().toLowerCase();
+    
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const reply = async (content) => {
+      await sleep(delaySeconds * 1000);
+      return message.channel.send(content);
+    };
+    
+    // HELP COMMANDS
+    if (cmd === 'help') {
+      const embed = new EmbedBuilder()
+        .setTitle('# * Help Menu')
+        .setDescription('⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,mod*** - __Shows moderation commands__\n> `✠` ***,games*** - __Shows games commands__\n> `✠` ***,fun*** - __Shows fun commands__\n> `✠` ***,activity*** - __Shows activity commands__\n> `✠` ***,user*** - __Shows user commands__\n> `✠` ***,wallet*** - __Shows wallet and crypto commands__\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')
+        .setColor(0x5865F2);
+      await reply({ embeds: [embed] });
+    }
+    
+    else if (cmd === 'mod') {
+      const embed = new EmbedBuilder()
+        .setTitle('# * Moderation Commands')
+        .setDescription('⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,purge [count]*** - __Purge your own messages__\n> `✠` ***,timeout [@user] [minutes]*** - __Timeout a user__\n> `✠` ***,snipe*** - __Shows last 5 deleted messages__\n> `✠` ***,ban [@user]*** - __Bans a user__\n> `✠` ***,kick @user*** - __Kicks a user__\n> `✠` ***,spam [times] [message]*** - __Spam message (max 50)__\n> `✠` ***,userinfo @user*** - __User info__\n> `✠` ***,serverinfo*** - __Server info__\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')
+        .setColor(0xED4245);
+      await reply({ embeds: [embed] });
+    }
+    
+    else if (cmd === 'games') {
+      const embed = new EmbedBuilder()
+        .setTitle('# * Games Commands')
+        .setDescription('⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,cf*** - __Flip a coin!__\n> `✠` ***,diceroll*** - __Roll a dice__\n> `✠` ***,rps [choice]*** - __Rock paper scissors__\n> `✠` ***,guess [number]*** - __Guess 1-10__\n> `✠` ***,gayrate [name]*** - __How gay?__\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')
+        .setColor(0x57F287);
+      await reply({ embeds: [embed] });
+    }
+    
+    else if (cmd === 'fun') {
+      const embed = new EmbedBuilder()
+        .setTitle('# * Fun Commands')
+        .setDescription('⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,feed [name]*** - __Feed someone__\n> `✠` ***,tickle [name]*** - __Tickle someone__\n> `✠` ***,hug [name]*** - __Hug someone__\n> `✠` ***,cuddle [name]*** - __Cuddle someone__\n> `✠` ***,pat [name]*** - __Pat someone__\n> `✠` ***,kiss [name]*** - __Kiss someone__\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')
+        .setColor(0xEB459E);
+      await reply({ embeds: [embed] });
+    }
+    
+    else if (cmd === 'activity') {
+      const embed = new EmbedBuilder()
+        .setTitle('# * Activity Commands')
+        .setDescription('⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,playing [content]*** - __Set playing status__\n> `✠` ***,watching [content]*** - __Set watching status__\n> `✠` ***,listening [content]*** - __Set listening status__\n> `✠` ***,streaming [content]*** - __Set streaming status__\n> `✠` ***,stopactivity*** - __Clear status__\n> `✠` ***,setrotating [status1,2,3...]*** - __Rotate status__\n> `✠` ***,stoprotating*** - __Stop rotating__\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')
+        .setColor(0xFEE75C);
+      await reply({ embeds: [embed] });
+    }
+    
+    else if (cmd === 'user') {
+      const embed = new EmbedBuilder()
+        .setTitle('# * User Commands')
+        .setDescription('⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,afk [reason]*** - __Set AFK__\n> `✠` ***,removeafk*** - __Remove AFK__\n> `✠` ***,hypesquad*** - __Random HypeSquad__\n> `✠` ***,iplookup [IP]*** - __Lookup IP__\n> `✠` ***,timer [duration]*** - __Discord timestamp__\n> `✠` ***,copyserver [source] [target]*** - __Copy server__\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')
+        .setColor(0x5865F2);
+      await reply({ embeds: [embed] });
+    }
+    
+    else if (cmd === 'wallet') {
+      await reply('💰 Wallet commands coming soon...');
+    }
+    
+    // MODERATION COMMANDS
+    else if (cmd === 'purge') {
+      const count = parseInt(args[0]) || 10;
+      const messages = await message.channel.messages.fetch({ limit: 100 });
+      const myMessages = messages.filter(m => m.author.id === selfbot.user.id).first(count);
+      
+      for (const msg of myMessages) {
+        await msg.delete().catch(() => {});
+        await sleep(350);
+      }
+      const replyMsg = await reply(`✅ Purged ${myMessages.length} messages`);
+      setTimeout(() => replyMsg.delete().catch(() => {}), 3000);
+    }
+    
+    else if (cmd === 'timeout') {
+      const target = message.mentions.members.first();
+      const minutes = parseInt(args[1]) || 5;
+      if (!target) return reply('❌ Mention a user');
+      
+      await target.timeout(minutes * 60000, 'Selfbot timeout').catch(e => reply(`❌ ${e.message}`));
+      await reply(`✅ Timed out ${target.user.tag} for ${minutes}m`);
+    }
+    
+    else if (cmd === 'snipe') {
+      const deleted = snipeData.get(message.channel.id) || [];
+      if (deleted.length === 0) return reply('❌ No deleted messages');
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🕵️ Sniped Messages')
+        .setDescription(deleted.slice(0, 5).map((m, i) => `**${i+1}.** ${m.author}: ${m.content}`).join('\n'))
+        .setColor(0x5865F2);
+      await reply({ embeds: [embed] });
+    }
+    
+    else if (cmd === 'ban') {
+      const target = message.mentions.users.first();
+      if (!target) return reply('❌ Mention a user');
+      
+      await message.guild.members.ban(target).catch(e => reply(`❌ ${e.message}`));
+      await reply(`✅ Banned ${target.tag}`);
+    }
+    
+    else if (cmd === 'kick') {
+      const target = message.mentions.members.first();
+      if (!target) return reply('❌ Mention a user');
+      
+      await target.kick().catch(e => reply(`❌ ${e.message}`));
+      await reply(`✅ Kicked ${target.user.tag}`);
+    }
+    
+    else if (cmd === 'spam') {
+      const times = Math.min(parseInt(args[0]) || 5, 50);
+      const text = args.slice(1).join(' ') || 'Spam';
+      
+      for (let i = 0; i < times; i++) {
+        await message.channel.send(text);
+        await sleep(1000);
+      }
+    }
+    
+    else if (cmd === 'userinfo') {
+      const target = message.mentions.users.first() || message.author;
+      const member = message.guild.members.cache.get(target.id);
+      
+      const embed = new EmbedBuilder()
+        .setTitle(`👤 ${target.tag}`)
+        .setThumbnail(target.displayAvatarURL())
+        .addFields(
+          { name: 'ID', value: target.id, inline: true },
+          { name: 'Created', value: `<t:${Math.floor(target.createdTimestamp/1000)}:R>`, inline: true },
+          { name: 'Joined', value: member ? `<t:${Math.floor(member.joinedTimestamp/1000)}:R>` : 'N/A', inline: true },
+          { name: 'Roles', value: member ? member.roles.cache.map(r => r.name).join(', ') : 'N/A' }
+        )
+        .setColor(0x5865F2);
+      await reply({ embeds: [embed] });
+    }
+    
+    else if (cmd === 'serverinfo') {
+      const guild = message.guild;
+      const embed = new EmbedBuilder()
+        .setTitle(`🏠 ${guild.name}`)
+        .setThumbnail(guild.iconURL())
+        .addFields(
+          { name: 'ID', value: guild.id, inline: true },
+          { name: 'Owner', value: `<@${guild.ownerId}>`, inline: true },
+          { name: 'Members', value: guild.memberCount.toString(), inline: true },
+          { name: 'Created', value: `<t:${Math.floor(guild.createdTimestamp/1000)}:R>`, inline: true }
+        )
+        .setColor(0x5865F2);
+      await reply({ embeds: [embed] });
+    }
+    
+    // GAMES
+    else if (cmd === 'cf') {
+      const result = Math.random() < 0.5 ? 'Heads' : 'Tails';
+      await reply(`🪙 **${result}**`);
+    }
+    
+    else if (cmd === 'diceroll') {
+      const roll = Math.floor(Math.random() * 6) + 1;
+      await reply(`🎲 You rolled a **${roll}**`);
+    }
+    
+    else if (cmd === 'rps') {
+      const choices = ['rock', 'paper', 'scissors'];
+      const user = args[0]?.toLowerCase();
+      if (!choices.includes(user)) return reply('❌ Choose rock, paper, or scissors');
+      
+      const bot = choices[Math.floor(Math.random() * 3)];
+      let result;
+      
+      if (user === bot) result = 'Tie!';
+      else if ((user === 'rock' && bot === 'scissors') || (user === 'paper' && bot === 'rock') || (user === 'scissors' && bot === 'paper')) result = 'You win!';
+      else result = 'You lose!';
+      
+      await reply(`✊ You: ${user} | Bot: ${bot}\n**${result}**`);
+    }
+    
+    else if (cmd === 'guess') {
+      const num = parseInt(args[0]);
+      if (!num || num < 1 || num > 10) return reply('❌ Guess 1-10');
+      
+      const answer = Math.floor(Math.random() * 10) + 1;
+      await reply(answer === num ? `🎉 Correct! It was ${answer}` : `❌ Wrong! It was ${answer}`);
+    }
+    
+    else if (cmd === 'gayrate') {
+      const name = args.join(' ') || message.author.username;
+      const rate = Math.floor(Math.random() * 101);
+      await reply(`🏳️‍🌈 **${name}** is ${rate}% gay`);
+    }
+    
+    // FUN COMMANDS
+    else if (['feed', 'tickle', 'hug', 'cuddle', 'pat', 'kiss'].includes(cmd)) {
+      const target = args.join(' ') || 'themselves';
+      const emojis = { feed: '🍔', tickle: '🤗', hug: '🤗', cuddle: '🥰', pat: '👋', kiss: '💋' };
+      await reply(`${emojis[cmd]} **${message.author.username}** ${cmd}s **${target}**!`);
+    }
+    
+    // ACTIVITY COMMANDS
+    else if (cmd === 'playing') {
+      const text = args.join(' ') || 'nothing';
+      selfbot.user.setActivity(text, { type: 0 });
+      await reply(`✅ Now playing **${text}**`);
+    }
+    
+    else if (cmd === 'watching') {
+      const text = args.join(' ') || 'nothing';
+      selfbot.user.setActivity(text, { type: 3 });
+      await reply(`✅ Now watching **${text}**`);
+    }
+    
+    else if (cmd === 'listening') {
+      const text = args.join(' ') || 'nothing';
+      selfbot.user.setActivity(text, { type: 2 });
+      await reply(`✅ Now listening to **${text}**`);
+    }
+    
+    else if (cmd === 'streaming') {
+      const text = args.join(' ') || 'nothing';
+      selfbot.user.setActivity(text, { type: 1, url: 'https://twitch.tv/discord' });
+      await reply(`✅ Now streaming **${text}**`);
+    }
+    
+    else if (cmd === 'stopactivity') {
+      selfbot.user.setActivity(null);
+      await reply('✅ Activity cleared');
+    }
+    
+    else if (cmd === 'setrotating') {
+      const statuses = args.join(' ').split(',').map(s => s.trim());
+      if (statuses.length === 0) return reply('❌ Provide statuses separated by commas');
+      
+      if (rotatingIntervals.has(selfbot.user.id)) clearInterval(rotatingIntervals.get(selfbot.user.id));
+      
+      let current = 0;
+      const interval = setInterval(() => {
+        selfbot.user.setActivity(statuses[current], { type: 0 });
+        current = (current + 1) % statuses.length;
+      }, 3000);
+      
+      rotatingIntervals.set(selfbot.user.id, interval);
+      await reply(`✅ Rotating ${statuses.length} statuses`);
+    }
+    
+    else if (cmd === 'stoprotating') {
+      if (rotatingIntervals.has(selfbot.user.id)) {
+        clearInterval(rotatingIntervals.get(selfbot.user.id));
+        rotatingIntervals.delete(selfbot.user.id);
+      }
+      await reply('✅ Rotating stopped');
+    }
+    
+    // USER COMMANDS
+    else if (cmd === 'afk') {
+      const reason = args.join(' ') || 'AFK';
+      userAFK.set(message.author.id, reason);
+      await reply(`💤 **AFK**: ${reason}`);
+    }
+    
+    else if (cmd === 'removeafk') {
+      userAFK.delete(message.author.id);
+      const pings = userPings.get(message.author.id) || [];
+      await reply(`✅ **No longer AFK**\n${pings.length > 0 ? `You were pinged in:\n${pings.join('\n')}` : 'No pings while AFK'}`);
+      userPings.delete(message.author.id);
+    }
+    
+    else if (cmd === 'hypesquad') {
+      const houses = ['Bravery', 'Brilliance', 'Balance'];
+      const house = houses[Math.floor(Math.random() * 3)];
+      await reply(`🏠 **HypeSquad House**: ${house}`);
+    }
+    
+    else if (cmd === 'iplookup') {
+      const ip = args[0];
+      if (!ip) return reply('❌ Provide an IP');
+      
+      try {
+        const res = await fetch(`http://ip-api.com/json/${ip}`);
+        const data = await res.json();
+        if (data.status === 'success') {
+          const embed = new EmbedBuilder()
+            .setTitle(`🔍 ${data.query}`)
+            .addFields(
+              { name: 'Country', value: data.country, inline: true },
+              { name: 'Region', value: data.regionName, inline: true },
+              { name: 'City', value: data.city, inline: true },
+              { name: 'ISP', value: data.isp, inline: true }
+            )
+            .setColor(0x5865F2);
+          await reply({ embeds: [embed] });
+        } else {
+          await reply('❌ Invalid IP');
+        }
+      } catch (e) {
+        await reply('❌ Lookup failed');
+      }
+    }
+    
+    else if (cmd === 'timer') {
+      const duration = args[0];
+      if (!duration) return reply('❌ Format: 24m/24h/24d/24mo/24y');
+      
+      const match = duration.match(/(\d+)([mhdmoy]+)/);
+      if (!match) return reply('❌ Invalid format');
+      
+      const num = parseInt(match[1]);
+      const unit = match[2];
+      const multipliers = { m: 60, h: 3600, d: 86400, mo: 2592000, y: 31536000 };
+      const seconds = num * (multipliers[unit] || 60);
+      const timestamp = Math.floor((Date.now() + seconds * 1000) / 1000);
+      
+      await reply(`⏰ **Timer set**\n<t:${timestamp}:R>`);
+    }
+    
+    else if (cmd === 'copyserver') {
+      await reply('⚠️ Copy server requires elevated permissions - use with caution');
+    }
+  });
+  
+  // Snipe handler
+  selfbot.on('messageDelete', (msg) => {
+    if (!msg.author || msg.author.bot) return;
+    const arr = snipeData.get(msg.channel.id) || [];
+    arr.unshift({ author: msg.author.tag, content: msg.content, time: Date.now() });
+    snipeData.set(msg.channel.id, arr.slice(0, 10));
+  });
+  
+  // AFK ping handler
+  selfbot.on('messageCreate', async (msg) => {
+    if (msg.author.id === selfbot.user.id) return;
+    if (msg.mentions.has(selfbot.user.id) && userAFK.has(selfbot.user.id)) {
+      const reason = userAFK.get(selfbot.user.id);
+      const pings = userPings.get(selfbot.user.id) || [];
+      pings.push(`<#${msg.channel.id}>: ${msg.content.slice(0, 50)}...`);
+      userPings.set(selfbot.user.id, pings);
+      await msg.reply(`💤 I'm AFK: ${reason}`).catch(() => {});
+    }
+  });
+}
+
+process.on('unhandledRejection', (err) => {
+  console.log('[ERROR]', err.message);
 });
 
-client.login(process.env.DISCORD_TOKEN).catch(err => { 
-  console.error('Login failed:', err); 
-  process.exit(1); 
-});
+botClient.login(process.env.DISCORD_TOKEN);
