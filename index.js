@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, PermissionsBitField } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
 const { Client: SelfbotClient } = require('discord.js-selfbot-v13');
 const sqlite3 = require('sqlite3').verbose();
 
@@ -26,7 +26,8 @@ db.serialize(() => {
 });
 
 const botClient = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers, GatewayIntentBits.DirectMessages],
+  partials: [1, 2, 5]
 });
 
 const ownerId = '1422945082746601594';
@@ -301,7 +302,7 @@ botClient.on('interactionCreate', async interaction => {
       });
       
       selfbot.once('ready', async () => {
-        console.log(`[SELFBOT] Running: ${selfbot.user.tag}`);
+        console.log(`[SELFBOT] Running: ${selfbot.user.tag} for user ${userId}`);
         await dbRun('UPDATE users SET status = ? WHERE user_id = ?', ['running', userId]);
         
         const newData = await dbGet('SELECT * FROM users WHERE user_id = ?', [userId]);
@@ -377,22 +378,39 @@ botClient.on('interactionCreate', async interaction => {
   }
 });
 
-function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
+function setupSelfbotCommands(selfbot, delaySeconds, selfbotUserId) {
   const prefix = ',';
   const userAFK = new Map();
   const userPings = new Map();
   
+  console.log(`[SELFBOT] Setting up commands for selfbot user ID: ${selfbotUserId} with ${delaySeconds}s delay`);
+  
+  // Monitor ALL messages from ANYWHERE (DMs, all servers, all channels)
   selfbot.on('messageCreate', async (message) => {
-    if (message.author.id !== selfbot.user.id) return;
-    if (!message.content.startsWith(prefix)) return;
+    // Ignore bot's own messages to prevent loops
+    if (message.author.id === selfbot.user.id) return;
     
-    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    // ONLY respond to the selfbot owner (the user who set the token)
+    if (message.author.id !== selfbotUserId) return;
+    
+    const content = message.content;
+    
+    // Must start with prefix
+    if (!content.startsWith(prefix)) return;
+    
+    console.log(`[CMD] Selfbot user ${message.author.username}: ${content} in ${!message.guild ? 'DMs' : message.guild.name + '/' + message.channel.name}`);
+    
+    const args = content.slice(prefix.length).trim().split(/ +/);
     const cmd = args.shift().toLowerCase();
     
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const reply = async (content) => {
       await sleep(delaySeconds * 1000);
-      return message.channel.send(content);
+      try {
+        return await message.channel.send(content);
+      } catch (e) {
+        console.log('[REPLY ERROR]', e.message);
+      }
     };
     
     // HELP COMMANDS
@@ -451,15 +469,19 @@ function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
     // MODERATION COMMANDS
     else if (cmd === 'purge') {
       const count = parseInt(args[0]) || 10;
-      const messages = await message.channel.messages.fetch({ limit: 100 });
-      const myMessages = messages.filter(m => m.author.id === selfbot.user.id).first(count);
-      
-      for (const msg of myMessages) {
-        await msg.delete().catch(() => {});
-        await sleep(350);
+      try {
+        const messages = await message.channel.messages.fetch({ limit: 100 });
+        const myMessages = messages.filter(m => m.author.id === selfbot.user.id).first(count);
+        
+        for (const msg of myMessages) {
+          await msg.delete().catch(() => {});
+          await sleep(350);
+        }
+        const replyMsg = await reply(`✅ Purged ${myMessages.length} messages`);
+        setTimeout(() => replyMsg.delete().catch(() => {}), 3000);
+      } catch (e) {
+        await reply(`❌ ${e.message}`);
       }
-      const replyMsg = await reply(`✅ Purged ${myMessages.length} messages`);
-      setTimeout(() => replyMsg.delete().catch(() => {}), 3000);
     }
     
     else if (cmd === 'timeout') {
@@ -467,8 +489,12 @@ function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
       const minutes = parseInt(args[1]) || 5;
       if (!target) return reply('❌ Mention a user');
       
-      await target.timeout(minutes * 60000, 'Selfbot timeout').catch(e => reply(`❌ ${e.message}`));
-      await reply(`✅ Timed out ${target.user.tag} for ${minutes}m`);
+      try {
+        await target.timeout(minutes * 60000, 'Selfbot timeout');
+        await reply(`✅ Timed out ${target.user.tag} for ${minutes}m`);
+      } catch (e) {
+        await reply(`❌ ${e.message}`);
+      }
     }
     
     else if (cmd === 'snipe') {
@@ -486,31 +512,40 @@ function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
       const target = message.mentions.users.first();
       if (!target) return reply('❌ Mention a user');
       
-      await message.guild.members.ban(target).catch(e => reply(`❌ ${e.message}`));
-      await reply(`✅ Banned ${target.tag}`);
+      try {
+        await message.guild.members.ban(target);
+        await reply(`✅ Banned ${target.tag}`);
+      } catch (e) {
+        await reply(`❌ ${e.message}`);
+      }
     }
     
     else if (cmd === 'kick') {
       const target = message.mentions.members.first();
       if (!target) return reply('❌ Mention a user');
       
-      await target.kick().catch(e => reply(`❌ ${e.message}`));
-      await reply(`✅ Kicked ${target.user.tag}`);
+      try {
+        await target.kick();
+        await reply(`✅ Kicked ${target.user.tag}`);
+      } catch (e) {
+        await reply(`❌ ${e.message}`);
+      }
     }
     
     else if (cmd === 'spam') {
       const times = Math.min(parseInt(args[0]) || 5, 50);
       const text = args.slice(1).join(' ') || 'Spam';
       
+      await reply(`⚡ Spamming ${times} times...`);
       for (let i = 0; i < times; i++) {
         await message.channel.send(text);
-        await sleep(1000);
+        await sleep(800);
       }
     }
     
     else if (cmd === 'userinfo') {
       const target = message.mentions.users.first() || message.author;
-      const member = message.guild.members.cache.get(target.id);
+      const member = message.guild?.members?.cache?.get(target.id);
       
       const embed = new EmbedBuilder()
         .setTitle(`👤 ${target.tag}`)
@@ -519,7 +554,7 @@ function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
           { name: 'ID', value: target.id, inline: true },
           { name: 'Created', value: `<t:${Math.floor(target.createdTimestamp/1000)}:R>`, inline: true },
           { name: 'Joined', value: member ? `<t:${Math.floor(member.joinedTimestamp/1000)}:R>` : 'N/A', inline: true },
-          { name: 'Roles', value: member ? member.roles.cache.map(r => r.name).join(', ') : 'N/A' }
+          { name: 'Roles', value: member ? member.roles.cache.map(r => r.name).slice(0, 10).join(', ') || 'None' : 'N/A' }
         )
         .setColor(0x5865F2);
       await reply({ embeds: [embed] });
@@ -527,6 +562,8 @@ function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
     
     else if (cmd === 'serverinfo') {
       const guild = message.guild;
+      if (!guild) return reply('❌ This command only works in servers');
+      
       const embed = new EmbedBuilder()
         .setTitle(`🏠 ${guild.name}`)
         .setThumbnail(guild.iconURL())
@@ -534,7 +571,8 @@ function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
           { name: 'ID', value: guild.id, inline: true },
           { name: 'Owner', value: `<@${guild.ownerId}>`, inline: true },
           { name: 'Members', value: guild.memberCount.toString(), inline: true },
-          { name: 'Created', value: `<t:${Math.floor(guild.createdTimestamp/1000)}:R>`, inline: true }
+          { name: 'Created', value: `<t:${Math.floor(guild.createdTimestamp/1000)}:R>`, inline: true },
+          { name: 'Channels', value: guild.channels.cache.size.toString(), inline: true }
         )
         .setColor(0x5865F2);
       await reply({ embeds: [embed] });
@@ -651,7 +689,7 @@ function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
     else if (cmd === 'removeafk') {
       userAFK.delete(message.author.id);
       const pings = userPings.get(message.author.id) || [];
-      await reply(`✅ **No longer AFK**\n${pings.length > 0 ? `You were pinged in:\n${pings.join('\n')}` : 'No pings while AFK'}`);
+      await reply(`✅ **No longer AFK**\n${pings.length > 0 ? `You were pinged in:\n${pings.slice(0, 5).join('\n')}` : 'No pings while AFK'}`);
       userPings.delete(message.author.id);
     }
     
@@ -708,25 +746,33 @@ function setupSelfbotCommands(selfbot, delaySeconds, ownerId) {
     }
   });
   
-  // Snipe handler
+  // Snipe handler - monitor ALL deleted messages in ALL channels
   selfbot.on('messageDelete', (msg) => {
-    if (!msg.author || msg.author.bot) return;
+    if (!msg.author || msg.author.bot || msg.author.id === selfbot.user.id) return;
     const arr = snipeData.get(msg.channel.id) || [];
-    arr.unshift({ author: msg.author.tag, content: msg.content, time: Date.now() });
+    arr.unshift({ author: msg.author.tag, content: msg.content || '[Embed/Attachment]', time: Date.now() });
     snipeData.set(msg.channel.id, arr.slice(0, 10));
   });
   
-  // AFK ping handler
+  // AFK ping handler - monitor ALL messages for pings to selfbot user
   selfbot.on('messageCreate', async (msg) => {
-    if (msg.author.id === selfbot.user.id) return;
-    if (msg.mentions.has(selfbot.user.id) && userAFK.has(selfbot.user.id)) {
-      const reason = userAFK.get(selfbot.user.id);
-      const pings = userPings.get(selfbot.user.id) || [];
-      pings.push(`<#${msg.channel.id}>: ${msg.content.slice(0, 50)}...`);
-      userPings.set(selfbot.user.id, pings);
-      await msg.reply(`💤 I'm AFK: ${reason}`).catch(() => {});
+    // Skip if from selfbot owner (already handled above) or bot
+    if (msg.author.id === selfbotUserId || msg.author.bot) return;
+    
+    // Check if selfbot user is AFK and got pinged
+    if (msg.mentions.has(selfbot.user.id) && userAFK.has(selfbotUserId)) {
+      const reason = userAFK.get(selfbotUserId);
+      const pings = userPings.get(selfbotUserId) || [];
+      pings.push(`<#${msg.channel.id}> from ${msg.author.username}: ${msg.content.slice(0, 30)}...`);
+      userPings.set(selfbotUserId, pings);
+      
+      try {
+        await msg.reply(`💤 <@${selfbotUserId}> is AFK: ${reason}`).catch(() => {});
+      } catch (e) {}
     }
   });
+  
+  console.log(`[SELFBOT] Commands setup complete - monitoring all servers, channels, and DMs for user ${selfbotUserId}`);
 }
 
 process.on('unhandledRejection', (err) => {
