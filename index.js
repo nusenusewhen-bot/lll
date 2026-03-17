@@ -1,10 +1,11 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, PermissionsBitField } = require('discord.js');
 const { Client: SelfbotClient } = require('discord.js-selfbot-v13');
-const Database = require('better-sqlite3');
+const sqlite3 = require('sqlite3').verbose();
 
-const db = new Database('./data.db');
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
+const db = new sqlite3.Database('./data.db');
+
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     key TEXT,
     key_expires INTEGER,
@@ -13,16 +14,16 @@ db.exec(`
     token_username TEXT,
     delay INTEGER DEFAULT 2,
     status TEXT DEFAULT 'stopped'
-  );
-  CREATE TABLE IF NOT EXISTS keys (
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS keys (
     key TEXT PRIMARY KEY,
     duration TEXT,
     created_at INTEGER,
     expires INTEGER,
     redeemed_by TEXT,
     redeemed_at INTEGER
-  );
-`);
+  )`);
+});
 
 const botClient = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers]
@@ -31,7 +32,6 @@ const botClient = new Client({
 const ownerId = '1422945082746601594';
 const activeSelfbots = new Map();
 const snipeData = new Map();
-const afkUsers = new Map();
 const rotatingIntervals = new Map();
 
 const superProps = {
@@ -63,6 +63,33 @@ const superProps = {
     client_distribution_type: 'app_store'
   })
 };
+
+function dbGet(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
+
+function dbAll(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+}
+
+function dbRun(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function(err) {
+      if (err) reject(err);
+      else resolve(this);
+    });
+  });
+}
 
 function updatePanelMessage(interaction, userData, selfbotRunning = false) {
   const hasToken = userData.token && userData.token_valid === 'yes';
@@ -130,7 +157,7 @@ botClient.once('ready', () => {
     new SlashCommandBuilder()
       .setName('revokeuser')
       .setDescription('Revoke all keys from user (Owner only)')
-      .addUserOption(opt => opt.setUser('user').setDescription('Target user').setRequired(true))
+      .addUserOption(opt => opt.setName('user').setDescription('Target user').setRequired(true))
       .toJSON(),
     new SlashCommandBuilder()
       .setName('sales')
@@ -166,8 +193,8 @@ botClient.on('interactionCreate', async interaction => {
     else if (duration.endsWith('h')) expires = Date.now() + parseInt(duration) * 3600000;
     else if (duration.endsWith('d')) expires = Date.now() + parseInt(duration) * 86400000;
     
-    db.prepare('INSERT INTO keys (key, duration, created_at, expires, redeemed_by, redeemed_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(key, duration, Date.now(), expires, null, null);
+    await dbRun('INSERT INTO keys (key, duration, created_at, expires, redeemed_by, redeemed_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [key, duration, Date.now(), expires, null, null]);
     
     return interaction.reply({ 
       content: `🔑 **Key Generated**\n\`${key}\`\nDuration: ${duration}\nExpires: ${expires ? new Date(expires).toLocaleString() : 'Never'}`, 
@@ -179,12 +206,12 @@ botClient.on('interactionCreate', async interaction => {
     if (!isOwner) return interaction.reply({ content: '❌ Owner only.', ephemeral: true });
     
     const target = interaction.options.getUser('user');
-    db.prepare('DELETE FROM users WHERE user_id = ?').run(target.id);
-    db.prepare('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE redeemed_by = ?').run(null, null, target.id);
+    await dbRun('DELETE FROM users WHERE user_id = ?', [target.id]);
+    await dbRun('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE redeemed_by = ?', [null, null, target.id]);
     
     if (activeSelfbots.has(target.id)) {
       const { client, interval } = activeSelfbots.get(target.id);
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
       client.destroy();
       activeSelfbots.delete(target.id);
     }
@@ -195,7 +222,7 @@ botClient.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'sales') {
     if (!isOwner) return interaction.reply({ content: '❌ Owner only.', ephemeral: true });
     
-    const allUsers = db.prepare('SELECT * FROM users WHERE token_valid = ?').all('yes');
+    const allUsers = await dbAll('SELECT * FROM users WHERE token_valid = ?', ['yes']);
     let content = `**Active Users:** ${allUsers.length}\n\n`;
     
     allUsers.forEach(u => {
@@ -207,21 +234,21 @@ botClient.on('interactionCreate', async interaction => {
   
   if (interaction.commandName === 'redkey') {
     const key = interaction.options.getString('key');
-    const keyData = db.prepare('SELECT * FROM keys WHERE key = ?').get(key);
+    const keyData = await dbGet('SELECT * FROM keys WHERE key = ?', [key]);
     
     if (!keyData) return interaction.reply({ content: '❌ Invalid key.', ephemeral: true });
     if (keyData.redeemed_by) return interaction.reply({ content: '❌ Key already used.', ephemeral: true });
     if (keyData.expires && Date.now() > keyData.expires) return interaction.reply({ content: '❌ Key expired.', ephemeral: true });
     
-    db.prepare('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE key = ?').run(interaction.user.id, Date.now(), key);
-    db.prepare('INSERT OR REPLACE INTO users (user_id, key, key_expires, token, token_valid, token_username, delay, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(interaction.user.id, key, keyData.expires, null, 'no', null, 2, 'stopped');
+    await dbRun('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE key = ?', [interaction.user.id, Date.now(), key]);
+    await dbRun('INSERT OR REPLACE INTO users (user_id, key, key_expires, token, token_valid, token_username, delay, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [interaction.user.id, key, keyData.expires, null, 'no', null, 2, 'stopped']);
     
     return interaction.reply({ content: '✅ Key redeemed! Use /panel to configure your selfbot.', ephemeral: true });
   }
   
   if (interaction.commandName === 'panel') {
-    const userData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
+    const userData = await dbGet('SELECT * FROM users WHERE user_id = ?', [interaction.user.id]);
     if (!userData) return interaction.reply({ content: '❌ Redeem a key first using /redkey', ephemeral: true });
     
     const running = activeSelfbots.has(interaction.user.id);
@@ -257,14 +284,14 @@ botClient.on('interactionCreate', async interaction => {
     }
     
     if (interaction.customId === 'start_bot') {
-      const userData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+      const userData = await dbGet('SELECT * FROM users WHERE user_id = ?', [userId]);
       if (!userData.token || userData.token_valid !== 'yes') {
         return interaction.reply({ content: '❌ Set and validate token first!', ephemeral: true });
       }
       
       if (activeSelfbots.has(userId)) {
         const old = activeSelfbots.get(userId);
-        clearInterval(old.interval);
+        if (old.interval) clearInterval(old.interval);
         old.client.destroy();
       }
       
@@ -275,9 +302,9 @@ botClient.on('interactionCreate', async interaction => {
       
       selfbot.once('ready', async () => {
         console.log(`[SELFBOT] Running: ${selfbot.user.tag}`);
-        db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('running', userId);
+        await dbRun('UPDATE users SET status = ? WHERE user_id = ?', ['running', userId]);
         
-        const newData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+        const newData = await dbGet('SELECT * FROM users WHERE user_id = ?', [userId]);
         const replyData = updatePanelMessage(interaction, newData, true);
         try { await interaction.update(replyData); } catch(e) {}
       });
@@ -300,9 +327,9 @@ botClient.on('interactionCreate', async interaction => {
         activeSelfbots.delete(userId);
       }
       
-      db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', userId);
+      await dbRun('UPDATE users SET status = ? WHERE user_id = ?', ['stopped', userId]);
       
-      const newData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+      const newData = await dbGet('SELECT * FROM users WHERE user_id = ?', [userId]);
       const replyData = updatePanelMessage(interaction, newData, false);
       return interaction.update(replyData);
     }
@@ -318,10 +345,10 @@ botClient.on('interactionCreate', async interaction => {
       const validation = await validateToken(token);
       
       if (validation.valid) {
-        db.prepare('UPDATE users SET token = ?, token_valid = ?, token_username = ? WHERE user_id = ?')
-          .run(token, 'yes', validation.user.tag, userId);
+        await dbRun('UPDATE users SET token = ?, token_valid = ?, token_username = ? WHERE user_id = ?',
+          [token, 'yes', validation.user.tag, userId]);
         
-        const newData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+        const newData = await dbGet('SELECT * FROM users WHERE user_id = ?', [userId]);
         const running = activeSelfbots.has(userId);
         
         await interaction.editReply({ 
@@ -340,9 +367,9 @@ botClient.on('interactionCreate', async interaction => {
       if (isNaN(delay) || delay < 1 || delay > 10) {
         return interaction.reply({ content: '❌ Delay must be 1-10 seconds!', ephemeral: true });
       }
-      db.prepare('UPDATE users SET delay = ? WHERE user_id = ?').run(delay, userId);
+      await dbRun('UPDATE users SET delay = ? WHERE user_id = ?', [delay, userId]);
       
-      const newData = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+      const newData = await dbGet('SELECT * FROM users WHERE user_id = ?', [userId]);
       const running = activeSelfbots.has(userId);
       await interaction.update(updatePanelMessage(interaction, newData, running));
       return;
