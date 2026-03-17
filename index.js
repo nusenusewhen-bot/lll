@@ -123,7 +123,7 @@ botClient.on('interactionCreate', async i => {
       
       setupSelfbotCommands(selfbot, userData.delay || 2, userId);
       activeSelfbots.set(userId, { client: selfbot, startTime: Date.now() });
-      selfbot.login(userData.token).catch(async (err) => { try { i.editReply({ content: `❌ Login failed: ${err.message}`, embeds: [], components: [] }); } catch(e) {} });
+      selfbot.login(userData.token).catch(async (err) => { console.log('[SELFBOT] Login error:', err.message); try { i.editReply({ content: `❌ Login failed: ${err.message}`, embeds: [], components: [] }); } catch(e) {} });
       return;
     }
     
@@ -160,40 +160,33 @@ botClient.on('interactionCreate', async i => {
 });
 
 const setupSelfbotCommands = (selfbot, delay, selfbotUserId) => {
-  const prefix = ',', userAFK = new Map(), userPings = new Map();
   console.log(`[SELFBOT] Setup for user ${selfbotUserId}, delay ${delay}s`);
+  const prefix = ',', userAFK = new Map(), userPings = new Map();
   
-  selfbot.on('messageCreate', async (msg) => {
-    if (msg.author.id === selfbot.user.id || msg.author.id !== selfbotUserId || !msg.content.startsWith(prefix)) return;
+  selfbot.on('messageCreate', async (message) => {
+    if (message.author.id === selfbot.user.id) return;
+    if (message.author.id !== selfbotUserId) return;
+    if (!message.content.startsWith(prefix)) return;
     
-    const args = msg.content.slice(prefix.length).trim().split(/ +/), cmd = args.shift().toLowerCase();
+    console.log(`[CMD] ${message.content}`);
+    const args = message.content.slice(prefix.length).trim().split(/ +/), cmd = args.shift().toLowerCase();
     const sleep = ms => new Promise(r => setTimeout(r, ms));
-    const reply = async content => { await sleep(delay * 1000); try { return await msg.channel.send(content); } catch(e) { console.log('[REPLY ERROR]', e.message); } };
-    
+    const reply = async content => { await sleep(delay * 1000); try { return await message.channel.send(content); } catch(e) {} };
     const embed = (title, desc, color = 0x5865F2) => new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color);
     
-    if (cmd === 'help') return reply({ embeds: [embed('# * Help Menu', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,mod*** - __Moderation commands__\n> `✠` ***,games*** - __Games commands__\n> `✠` ***,fun*** - __Fun commands__\n> `✠` ***,activity*** - __Status commands__\n> `✠` ***,user*** - __User commands__\n> `✠` ***,wallet*** - __Crypto commands__\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')] });
-    if (cmd === 'mod') return reply({ embeds: [embed('# * Moderation', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,purge [count]*** - __Purge your messages__\n> `✠` ***,timeout @user [min]*** - __Timeout user__\n> `✠` ***,snipe*** - __Deleted messages__\n> `✠` ***,ban @user*** - __Ban user__\n> `✠` ***,kick @user*** - __Kick user__\n> `✠` ***,spam [times] [msg]*** - __Spam (max 50)__\n> `✠` ***,userinfo @user*** - __User info__\n> `✠` ***,serverinfo*** - __Server info__\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘', 0xED4245)] });
-    if (cmd === 'games') return reply({ embeds: [embed('# * Games', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,cf*** - __Coin flip__\n> `✠` ***,diceroll*** - __Roll dice__\n> `✠` ***,rps [choice]*** - __Rock paper scissors__\n> `✠` ***,guess [num]*** - __Guess 1-10__\n> `✠` ***,gayrate [name]*** - __Gay rate__\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘', 0x57F287)] });
+    if (cmd === 'help') return reply({ embeds: [embed('# * Help Menu', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,mod*** - Moderation\n> `✠` ***,games*** - Games\n> `✠` ***,fun*** - Fun\n> `✠` ***,activity*** - Status\n> `✠` ***,user*** - User\n> `✠` ***,wallet*** - Crypto\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')] });
+    if (cmd === 'mod') return reply({ embeds: [embed('# * Moderation', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,purge [count]***\n> `✠` ***,timeout @user [min]***\n> `✠` ***,snipe***\n> `✠` ***,ban @user***\n> `✠` ***,kick @user***\n> `✠` ***,spam [times] [msg]***\n> `✠` ***,userinfo @user***\n> `✠` ***,serverinfo***\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘', 0xED4245)] });
+    if (cmd === 'games') return reply({ embeds: [embed('# * Games', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,cf*** - Coin flip\n> `✠` ***,diceroll***\n> `✠` ***,rps [choice]***\n> `✠` ***,guess [num]***\n> `✠` ***,gayrate [name]***\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘', 0x57F287)] });
     if (cmd === 'fun') return reply({ embeds: [embed('# * Fun', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,feed [name]***\n> `✠` ***,tickle [name]***\n> `✠` ***,hug [name]***\n> `✠` ***,cuddle [name]***\n> `✠` ***,pat [name]***\n> `✠` ***,kiss [name]***\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘', 0xEB459E)] });
     if (cmd === 'activity') return reply({ embeds: [embed('# * Activity', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,playing [text]***\n> `✠` ***,watching [text]***\n> `✠` ***,listening [text]***\n> `✠` ***,streaming [text]***\n> `✠` ***,stopactivity***\n> `✠` ***,setrotating [s1,s2...]***\n> `✠` ***,stoprotating***\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘', 0xFEE75C)] });
-    if (cmd === 'user') return reply({ embeds: [embed('# * User', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,afk [reason]***\n> `✠` ***,removeafk***\n> `✠` ***,hypesquad***\n> `✠` ***,iplookup [IP]***\n> `✠` ***,timer [duration]***\n> `✠` ***,copyserver [src] [tgt]***\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')] });
+    if (cmd === 'user') return reply({ embeds: [embed('# * User', '⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘\n> `✠` ***,afk [reason]***\n> `✠` ***,removeafk***\n> `✠` ***,hypesquad***\n> `✠` ***,iplookup [IP]***\n> `✠` ***,timer [duration]***\n⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘')] });
     if (cmd === 'wallet') return reply('💰 Coming soon...');
-    
-    if (cmd === 'purge') { const count = parseInt(args[0]) || 10, msgs = await msg.channel.messages.fetch({ limit: 100 }), myMsgs = msgs.filter(m => m.author.id === selfbot.user.id).first(count); for (const m of myMsgs) { await m.delete().catch(() => {}); await sleep(350); } const r = await reply(`✅ Purged ${myMsgs.length}`); setTimeout(() => r.delete().catch(() => {}), 3000); }
-    else if (cmd === 'timeout') { const t = msg.mentions.members.first(), m = parseInt(args[1]) || 5; if (!t) return reply('❌ Mention user'); try { await t.timeout(m * 60000); reply(`✅ Timed out ${t.user.tag} for ${m}m`); } catch(e) { reply(`❌ ${e.message}`); } }
-    else if (cmd === 'snipe') { const d = snipeData.get(msg.channel.id) || []; if (!d.length) return reply('❌ No deleted messages'); reply({ embeds: [embed('🕵️ Sniped', d.slice(0, 5).map((m, i) => `**${i+1}.** ${m.author}: ${m.content}`).join('\n'))] }); }
-    else if (cmd === 'ban') { const t = msg.mentions.users.first(); if (!t) return reply('❌ Mention user'); try { await msg.guild.members.ban(t); reply(`✅ Banned ${t.tag}`); } catch(e) { reply(`❌ ${e.message}`); } }
-    else if (cmd === 'kick') { const t = msg.mentions.members.first(); if (!t) return reply('❌ Mention user'); try { await t.kick(); reply(`✅ Kicked ${t.user.tag}`); } catch(e) { reply(`❌ ${e.message}`); } }
-    else if (cmd === 'spam') { const times = Math.min(parseInt(args[0]) || 5, 50), text = args.slice(1).join(' ') || 'Spam'; reply(`⚡ Spamming ${times}...`); for (let i = 0; i < times; i++) { await msg.channel.send(text); await sleep(800); } }
-    else if (cmd === 'userinfo') { const t = msg.mentions.users.first() || msg.author, m = msg.guild?.members?.cache?.get(t.id); reply({ embeds: [embed(`👤 ${t.tag}`, `**ID:** ${t.id}\n**Created:** <t:${Math.floor(t.createdTimestamp/1000)}:R>\n**Joined:** ${m ? `<t:${Math.floor(m.joinedTimestamp/1000)}:R>` : 'N/A'}\n**Roles:** ${m ? m.roles.cache.map(r => r.name).slice(0, 10).join(', ') || 'None' : 'N/A'}`).setThumbnail(t.displayAvatarURL())] }); }
-    else if (cmd === 'serverinfo') { const g = msg.guild; if (!g) return reply('❌ Server only'); reply({ embeds: [embed(`🏠 ${g.name}`, `**ID:** ${g.id}\n**Owner:** <@${g.ownerId}>\n**Members:** ${g.memberCount}\n**Created:** <t:${Math.floor(g.createdTimestamp/1000)}:R>\n**Channels:** ${g.channels.cache.size}`).setThumbnail(g.iconURL())] }); }
-    else if (cmd === 'cf') reply(`🪙 **${Math.random() < 0.5 ? 'Heads' : 'Tails'}**`);
+    if (cmd === 'cf') reply(`🪙 **${Math.random() < 0.5 ? 'Heads' : 'Tails'}**`);
     else if (cmd === 'diceroll') reply(`🎲 **${Math.floor(Math.random() * 6) + 1}**`);
     else if (cmd === 'rps') { const c = ['rock', 'paper', 'scissors'], u = args[0]?.toLowerCase(); if (!c.includes(u)) return reply('❌ rock/paper/scissors'); const b = c[Math.floor(Math.random() * 3)]; reply(`✊ You: ${u} | Bot: ${b}\n**${u === b ? 'Tie!' : (u === 'rock' && b === 'scissors') || (u === 'paper' && b === 'rock') || (u === 'scissors' && b === 'paper') ? 'You win!' : 'You lose!'}**`); }
-    else if (cmd === 'guess') { const n = parseInt(args[0]); if (!n || n < 1 || n > 10) return reply('❌ 1-10'); const a = Math.floor(Math.random() * 10) + 1; reply(n === a ? `🎉 Correct! ${a}` : `❌ Wrong! It was ${a}`); }
-    else if (cmd === 'gayrate') reply(`🏳️‍🌈 **${args.join(' ') || msg.author.username}** is ${Math.floor(Math.random() * 101)}% gay`);
-    else if (['feed', 'tickle', 'hug', 'cuddle', 'pat', 'kiss'].includes(cmd)) { const e = { feed: '🍔', tickle: '🤗', hug: '🤗', cuddle: '🥰', pat: '👋', kiss: '💋' }; reply(`${e[cmd]} **${msg.author.username}** ${cmd}s **${args.join(' ') || 'themselves'}**!`); }
+    else if (cmd === 'guess') { const n = parseInt(args[0]); if (!n || n < 1 || n > 10) return reply('❌ 1-10'); const a = Math.floor(Math.random() * 10) + 1; reply(n === a ? `🎉 Correct! ${a}` : `❌ Wrong! ${a}`); }
+    else if (cmd === 'gayrate') reply(`🏳️‍🌈 **${args.join(' ') || message.author.username}** is ${Math.floor(Math.random() * 101)}% gay`);
+    else if (['feed', 'tickle', 'hug', 'cuddle', 'pat', 'kiss'].includes(cmd)) { const e = { feed: '🍔', tickle: '🤗', hug: '🤗', cuddle: '🥰', pat: '👋', kiss: '💋' }; reply(`${e[cmd]} **${message.author.username}** ${cmd}s **${args.join(' ') || 'themselves'}**!`); }
     else if (cmd === 'playing') { selfbot.user.setActivity(args.join(' ') || 'nothing', { type: 0 }); reply(`✅ Playing **${args.join(' ') || 'nothing'}**`); }
     else if (cmd === 'watching') { selfbot.user.setActivity(args.join(' ') || 'nothing', { type: 3 }); reply(`✅ Watching **${args.join(' ') || 'nothing'}**`); }
     else if (cmd === 'listening') { selfbot.user.setActivity(args.join(' ') || 'nothing', { type: 2 }); reply(`✅ Listening to **${args.join(' ') || 'nothing'}**`); }
@@ -201,12 +194,19 @@ const setupSelfbotCommands = (selfbot, delay, selfbotUserId) => {
     else if (cmd === 'stopactivity') { selfbot.user.setActivity(null); reply('✅ Activity cleared'); }
     else if (cmd === 'setrotating') { const s = args.join(' ').split(',').map(x => x.trim()); if (!s.length) return reply('❌ Provide statuses'); if (rotatingIntervals.has(selfbot.user.id)) clearInterval(rotatingIntervals.get(selfbot.user.id)); let cur = 0; const int = setInterval(() => { selfbot.user.setActivity(s[cur], { type: 0 }); cur = (cur + 1) % s.length; }, 3000); rotatingIntervals.set(selfbot.user.id, int); reply(`✅ Rotating ${s.length} statuses`); }
     else if (cmd === 'stoprotating') { if (rotatingIntervals.has(selfbot.user.id)) { clearInterval(rotatingIntervals.get(selfbot.user.id)); rotatingIntervals.delete(selfbot.user.id); } reply('✅ Rotating stopped'); }
-    else if (cmd === 'afk') { userAFK.set(msg.author.id, args.join(' ') || 'AFK'); reply(`💤 **AFK:** ${args.join(' ') || 'AFK'}`); }
-    else if (cmd === 'removeafk') { userAFK.delete(msg.author.id); const p = userPings.get(msg.author.id) || []; reply(`✅ **No longer AFK**\n${p.length ? `Pings:\n${p.slice(0, 5).join('\n')}` : 'No pings'}`); userPings.delete(msg.author.id); }
+    else if (cmd === 'afk') { userAFK.set(message.author.id, args.join(' ') || 'AFK'); reply(`💤 **AFK:** ${args.join(' ') || 'AFK'}`); }
+    else if (cmd === 'removeafk') { userAFK.delete(message.author.id); const p = userPings.get(message.author.id) || []; reply(`✅ **No longer AFK**\n${p.length ? `Pings:\n${p.slice(0, 5).join('\n')}` : 'No pings'}`); userPings.delete(message.author.id); }
     else if (cmd === 'hypesquad') reply(`🏠 **${['Bravery', 'Brilliance', 'Balance'][Math.floor(Math.random() * 3)]}**`);
     else if (cmd === 'iplookup') { const ip = args[0]; if (!ip) return reply('❌ Provide IP'); try { const r = await fetch(`http://ip-api.com/json/${ip}`), d = await r.json(); if (d.status === 'success') reply({ embeds: [embed(`🔍 ${d.query}`, `**Country:** ${d.country}\n**Region:** ${d.regionName}\n**City:** ${d.city}\n**ISP:** ${d.isp}`)] }); else reply('❌ Invalid IP'); } catch(e) { reply('❌ Lookup failed'); } }
-    else if (cmd === 'timer') { const d = args[0]; if (!d) return reply('❌ Format: 24m/24h/24d/24mo/24y'); const m = d.match(/(\d+)([mhdmoy]+)/); if (!m) return reply('❌ Invalid format'); const n = parseInt(m[1]), u = m[2], mult = { m: 60, h: 3600, d: 86400, mo: 2592000, y: 31536000 }; reply(`⏰ **Timer:** <t:${Math.floor((Date.now() + n * (mult[u] || 60) * 1000) / 1000)}:R>`); }
-    else if (cmd === 'copyserver') reply('⚠️ Requires elevated permissions');
+    else if (cmd === 'timer') { const d = args[0]; if (!d) return reply('❌ Format: 24m/24h/24d'); const m = d.match(/(\d+)([mhd])/); if (!m) return reply('❌ Invalid'); const n = parseInt(m[1]), u = m[2], mult = { m: 60, h: 3600, d: 86400 }; reply(`⏰ <t:${Math.floor((Date.now() + n * (mult[u] || 60) * 1000) / 1000)}:R>`); }
+    else if (cmd === 'purge') { const count = parseInt(args[0]) || 10, msgs = await message.channel.messages.fetch({ limit: 100 }), myMsgs = msgs.filter(m => m.author.id === selfbot.user.id).first(count); for (const m of myMsgs) { await m.delete().catch(() => {}); await sleep(350); } const r = await reply(`✅ Purged ${myMsgs.length}`); setTimeout(() => r.delete().catch(() => {}), 3000); }
+    else if (cmd === 'timeout') { const t = message.mentions.members.first(), m = parseInt(args[1]) || 5; if (!t) return reply('❌ Mention user'); try { await t.timeout(m * 60000); reply(`✅ Timed out ${t.user.tag}`); } catch(e) { reply(`❌ ${e.message}`); } }
+    else if (cmd === 'snipe') { const d = snipeData.get(message.channel.id) || []; if (!d.length) return reply('❌ No deleted messages'); reply({ embeds: [embed('🕵️ Sniped', d.slice(0, 5).map((m, i) => `**${i+1}.** ${m.author}: ${m.content}`).join('\n'))] }); }
+    else if (cmd === 'ban') { const t = message.mentions.users.first(); if (!t) return reply('❌ Mention user'); try { await message.guild.members.ban(t); reply(`✅ Banned ${t.tag}`); } catch(e) { reply(`❌ ${e.message}`); } }
+    else if (cmd === 'kick') { const t = message.mentions.members.first(); if (!t) return reply('❌ Mention user'); try { await t.kick(); reply(`✅ Kicked ${t.user.tag}`); } catch(e) { reply(`❌ ${e.message}`); } }
+    else if (cmd === 'spam') { const times = Math.min(parseInt(args[0]) || 5, 50), text = args.slice(1).join(' ') || 'Spam'; reply(`⚡ Spamming...`); for (let i = 0; i < times; i++) { await message.channel.send(text); await sleep(800); } }
+    else if (cmd === 'userinfo') { const t = message.mentions.users.first() || message.author, m = message.guild?.members?.cache?.get(t.id); reply({ embeds: [embed(`👤 ${t.tag}`, `**ID:** ${t.id}\n**Created:** <t:${Math.floor(t.createdTimestamp/1000)}:R>\n**Joined:** ${m ? `<t:${Math.floor(m.joinedTimestamp/1000)}:R>` : 'N/A'}\n**Roles:** ${m ? m.roles.cache.map(r => r.name).slice(0, 10).join(', ') || 'None' : 'N/A'}`).setThumbnail(t.displayAvatarURL())] }); }
+    else if (cmd === 'serverinfo') { const g = message.guild; if (!g) return reply('❌ Server only'); reply({ embeds: [embed(`🏠 ${g.name}`, `**ID:** ${g.id}\n**Owner:** <@${g.ownerId}>\n**Members:** ${g.memberCount}\n**Created:** <t:${Math.floor(g.createdTimestamp/1000)}:R>`).setThumbnail(g.iconURL())] }); }
   });
   
   selfbot.on('messageDelete', m => { if (!m.author || m.author.bot || m.author.id === selfbot.user.id) return; const a = snipeData.get(m.channel.id) || []; a.unshift({ author: m.author.tag, content: m.content || '[Embed]', time: Date.now() }); snipeData.set(m.channel.id, a.slice(0, 10)); });
